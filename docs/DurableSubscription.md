@@ -41,7 +41,8 @@ Typically the following porting steps are necessary:
 - Report a store that cannot read its subscriptions from
   `RestoreSubscriptionsAsync`, either by throwing or by returning
   `RestoreSubscriptionResult.Success = false`; return `Success = true` with no
-  subscriptions when nothing was stored. Keep the stored subscriptions until
+  subscriptions when nothing was stored. Keep the stored subscriptions and the
+  queue snapshots of their monitored items until
   `OnSubscriptionRestoreCompleteAsync` is called: the server calls it only
   after it has recreated every stored subscription, so a store that deletes
   its data while reading it loses the subscriptions when the restore fails.
