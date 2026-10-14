@@ -36,6 +36,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using Opc.Ua.SourceGeneration;
+using Opc.Ua.SourceGeneration.Dependency;
 using Opc.Ua.Tests;
 
 namespace Opc.Ua.Schema.Model.Tests
@@ -88,6 +89,59 @@ namespace Opc.Ua.Schema.Model.Tests
             {
                 Assert.That(body, Does.Contain(NullValue));
                 Assert.That(body, Does.Not.Contain("(double)0"));
+            });
+        }
+
+        [Test]
+        public void InstanceOfVariableTypeWithoutValueIsNull()
+        {
+            string body = ExtractMethodBody(GenerateDeviceSetPump(), "CreateInstanceOfFlowVariableType");
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(body, Does.Contain(NullValue));
+                Assert.That(body, Does.Not.Contain("(double)0"));
+            });
+        }
+
+        [Test]
+        public void DependencyPayloadCarriesTheAbsentValue()
+        {
+            var dependency = new ModelDependencyV1 { ModelUri = "http://test.org/UA/ValueAbsent/" };
+            dependency.Nodes.Add(new DependencyNode
+            {
+                SymbolicName = "PumpType",
+                SymbolicNamespace = "http://test.org/UA/ValueAbsent/",
+                ClassName = "PumpType",
+                Kind = DependencyNodeKind.ObjectType,
+                Children =
+                [
+                    new DependencyChild
+                    {
+                        BrowseName = "RatedFlow",
+                        SymbolicName = "RatedFlow",
+                        InstanceKind = 3,
+                        NodeSetValueIsNull = true
+                    },
+                    new DependencyChild
+                    {
+                        BrowseName = "SerialNumber",
+                        SymbolicName = "SerialNumber",
+                        InstanceKind = 3,
+                        DefaultValueXml = "<String xmlns=\"http://opcfoundation.org/UA/2008/02/Types.xsd\">SN</String>"
+                    }
+                ]
+            });
+
+            ModelDependencyV1? decoded = ModelDependencyV1.FromBase64Payload(dependency.ToBase64Payload());
+
+            Assert.That(decoded, Is.Not.Null);
+            IReadOnlyList<DependencyChild> children = decoded!.Nodes.Single().Children;
+            Assert.Multiple(() =>
+            {
+                Assert.That(children[0].NodeSetValueIsNull, Is.True);
+                Assert.That(children[1].NodeSetValueIsNull, Is.False);
+                Assert.That(children[1].DefaultValueXml, Does.Contain("SN"));
             });
         }
 
