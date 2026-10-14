@@ -61,6 +61,13 @@ namespace Opc.Ua.Redundancy
     /// the materialized map. The change-feed (<see cref="WatchAsync"/>) is derived from the same apply stream, so
     /// watchers observe changes in commit order.
     /// </para>
+    /// <para>
+    /// Over an <see cref="IRaftSnapshotConsensus"/> the store applies the engine's apply stream with log indices
+    /// (<see cref="AppliedIndex"/>). A snapshot on that stream (a lagging replica installing the leader's snapshot, or
+    /// the first item after a restart) replaces the materialized map, and watchers receive the changes between the
+    /// former and the new map. With a compaction interval, the store snapshots its map every that many applied
+    /// commands and lets the engine discard the log behind the snapshot, which bounds the Raft log.
+    /// </para>
     /// </remarks>
     public sealed class RaftSharedKeyValueStore :
         ISharedKeyValueStore,
@@ -106,16 +113,45 @@ namespace Opc.Ua.Redundancy
         /// lost. Defaults to 30 seconds; pass <see cref="Timeout.InfiniteTimeSpan"/> to wait only on the caller's
         /// token.
         /// </param>
+        /// <param name="compactionInterval">
+        /// When positive, the store snapshots its state after every that many applied commands and the consensus
+        /// discards the log behind the snapshot (<see cref="IRaftSnapshotConsensus.CompactAsync"/>), so the Raft log
+        /// stays bounded. Zero (the default) never compacts. A positive interval requires an
+        /// <see cref="IRaftSnapshotConsensus"/>.
+        /// </param>
+        /// <exception cref="ArgumentOutOfRangeException"><paramref name="compactionInterval"/> is negative.</exception>
+        /// <exception cref="ArgumentException">
+        /// <paramref name="compactionInterval"/> is positive and the consensus does not compact.
+        /// </exception>
         public RaftSharedKeyValueStore(
             IRaftConsensus consensus,
             bool ownsConsensus = false,
-            TimeSpan commitTimeout = default)
+            TimeSpan commitTimeout = default,
+            int compactionInterval = 0)
         {
             m_consensus = consensus ?? throw new ArgumentNullException(nameof(consensus));
+            if (compactionInterval < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(compactionInterval), "The compaction interval is negative.");
+            }
+            if (compactionInterval > 0 && consensus is not IRaftSnapshotConsensus)
+            {
+                throw new ArgumentException(
+                    "Compaction requires a consensus that implements IRaftSnapshotConsensus.",
+                    nameof(compactionInterval));
+            }
             m_processLocal = consensus is InProcessRaftConsensus;
             m_ownsConsensus = ownsConsensus;
             m_commitTimeout = commitTimeout == TimeSpan.Zero ? TimeSpan.FromSeconds(30) : commitTimeout;
+            m_compactionInterval = compactionInterval;
         }
+
+        /// <summary>
+        /// The log index of the last item of <see cref="IRaftSnapshotConsensus.CommittedItems"/> the store applied:
+        /// the log position its state corresponds to. Zero until the store applied an item, and always zero over a
+        /// consensus without log indices.
+        /// </summary>
+        public ulong AppliedIndex => Volatile.Read(ref m_appliedIndex);
 
         /// <inheritdoc/>
         public async ValueTask<(bool Found, ByteString Value)> TryGetAsync(string key, CancellationToken ct = default)
@@ -169,24 +205,28 @@ namespace Opc.Ua.Redundancy
         public async ValueTask<ReadOnlyMemory<byte>> CreateSnapshotAsync(CancellationToken ct = default)
         {
             _ = await ProposeAsync(OpBarrier, string.Empty, default, default, ct).ConfigureAwait(false);
+            lock (m_lock)
+            {
+                return EncodeStateLocked();
+            }
+        }
 
+        private byte[] EncodeStateLocked()
+        {
             using var stream = new MemoryStream();
             using (var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true))
             {
                 writer.Write(s_snapshotEncodingVersion);
-                lock (m_lock)
+                writer.Write(m_state.Count);
+                foreach (KeyValuePair<string, ByteString> entry in m_state)
                 {
-                    writer.Write(m_state.Count);
-                    foreach (KeyValuePair<string, ByteString> entry in m_state)
-                    {
-                        byte[] key = Encoding.UTF8.GetBytes(entry.Key);
-                        writer.Write(key.Length);
-                        writer.Write(key);
-                        writer.Write(entry.Value.IsNull);
-                        byte[] value = entry.Value.IsNull ? [] : entry.Value.ToArray() ?? [];
-                        writer.Write(value.Length);
-                        writer.Write(value);
-                    }
+                    byte[] key = Encoding.UTF8.GetBytes(entry.Key);
+                    writer.Write(key.Length);
+                    writer.Write(key);
+                    writer.Write(entry.Value.IsNull);
+                    byte[] value = entry.Value.IsNull ? [] : entry.Value.ToArray() ?? [];
+                    writer.Write(value.Length);
+                    writer.Write(value);
                 }
             }
             return stream.ToArray();
@@ -522,20 +562,17 @@ namespace Opc.Ua.Redundancy
         {
             try
             {
+                if (m_consensus is IRaftSnapshotConsensus snapshotting)
+                {
+                    await ApplyItemsAsync(snapshotting, ct).ConfigureAwait(false);
+                    return;
+                }
+
                 await foreach (ReadOnlyMemory<byte> command in m_consensus.Committed
                     .ReadAllAsync(ct)
                     .ConfigureAwait(false))
                 {
-                    try
-                    {
-                        Apply(command.Span);
-                    }
-                    catch (Exception ex)
-                    {
-                        Trace.TraceWarning(
-                            "Skipping malformed RaftSharedKeyValueStore command. The applier will continue. {0}",
-                            ex);
-                    }
+                    ApplyCommand(command.Span);
                 }
             }
             catch (OperationCanceledException)
@@ -548,6 +585,105 @@ namespace Opc.Ua.Redundancy
                 // ever dies unexpectedly, fail every pending proposal so callers
                 // do not hang.
                 FailAllPending(ex);
+            }
+        }
+
+        private async Task ApplyItemsAsync(IRaftSnapshotConsensus consensus, CancellationToken ct)
+        {
+            ulong snapshotIndex = 0;
+            int sinceSnapshot = 0;
+            await foreach (RaftCommittedItem item in consensus.CommittedItems
+                .ReadAllAsync(ct)
+                .ConfigureAwait(false))
+            {
+                if (item.IsSnapshot)
+                {
+                    // A snapshot that cannot be decoded leaves the state unknown: it stops the applier.
+                    InstallSnapshot(item.Data.Span);
+                    snapshotIndex = item.Index;
+                    sinceSnapshot = 0;
+                }
+                else
+                {
+                    ApplyCommand(item.Data.Span);
+                    sinceSnapshot++;
+                }
+                Volatile.Write(ref m_appliedIndex, item.Index);
+
+                if (m_compactionInterval > 0 && sinceSnapshot >= m_compactionInterval && item.Index > snapshotIndex)
+                {
+                    byte[] snapshot;
+                    lock (m_lock)
+                    {
+                        snapshot = EncodeStateLocked();
+                    }
+                    try
+                    {
+                        await consensus.CompactAsync(item.Index, snapshot, ct).ConfigureAwait(false);
+                        snapshotIndex = item.Index;
+                        sinceSnapshot = 0;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        // The log is intact, only not yet bounded; the next interval retries.
+                        Trace.TraceWarning(
+                            "RaftSharedKeyValueStore could not compact the Raft log at index {0}. {1}",
+                            item.Index,
+                            ex);
+                        sinceSnapshot = 0;
+                    }
+                }
+            }
+        }
+
+        private void ApplyCommand(ReadOnlySpan<byte> command)
+        {
+            try
+            {
+                Apply(command);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning(
+                    "Skipping malformed RaftSharedKeyValueStore command. The applier will continue. {0}",
+                    ex);
+            }
+        }
+
+        /// <summary>
+        /// Replaces the state with a snapshot from the consensus and publishes the differences to the watchers. A
+        /// pending operation whose command the snapshot covers is not applied on its own; it fails with the commit
+        /// timeout, its outcome unknown.
+        /// </summary>
+        private void InstallSnapshot(ReadOnlySpan<byte> snapshot)
+        {
+            Dictionary<string, ByteString> state = DecodeSnapshot(snapshot);
+            lock (m_lock)
+            {
+                foreach (KeyValuePair<string, ByteString> entry in m_state)
+                {
+                    if (!state.ContainsKey(entry.Key))
+                    {
+                        PublishLocked(new KeyValueChange { Kind = KeyValueChangeKind.Delete, Key = entry.Key });
+                    }
+                }
+                foreach (KeyValuePair<string, ByteString> entry in state)
+                {
+                    if (!m_state.TryGetValue(entry.Key, out ByteString current) || !current.Equals(entry.Value))
+                    {
+                        PublishLocked(new KeyValueChange
+                        {
+                            Kind = KeyValueChangeKind.Set,
+                            Key = entry.Key,
+                            Value = entry.Value
+                        });
+                    }
+                }
+                m_state.Clear();
+                foreach (KeyValuePair<string, ByteString> entry in state)
+                {
+                    m_state[entry.Key] = entry.Value;
+                }
             }
         }
 
@@ -791,6 +927,7 @@ namespace Opc.Ua.Redundancy
         private readonly bool m_processLocal;
         private readonly bool m_ownsConsensus;
         private readonly TimeSpan m_commitTimeout;
+        private readonly int m_compactionInterval;
         private readonly Guid m_originator = Guid.NewGuid();
         private readonly Dictionary<string, ByteString> m_state = new(StringComparer.Ordinal);
         private readonly List<Watcher> m_watchers = [];
@@ -801,6 +938,7 @@ namespace Opc.Ua.Redundancy
         private readonly CancellationTokenSource m_cts = new();
         private Task? m_applyLoop;
         private long m_requestId;
+        private ulong m_appliedIndex;
         private int m_started;
         private int m_disposed;
     }
