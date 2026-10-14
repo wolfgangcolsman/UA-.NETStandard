@@ -1,0 +1,257 @@
+name: ZONTAL pack
+
+# Builds and tests the ZONTAL-patched stack (see NOTICE.md), packs the
+# OPCFoundation.NetStandard.Opc.Ua.* packages at the fork version and pushes
+# them to the NuGet feed of the studio organization.
+
+on:
+  push:
+    tags: [ '2.0.0-zontal.*' ]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Push the packages to the studio feed
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zontal-pack-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  PACKAGE_VERSION: 2.0.0-zontal.1
+  NUGET_FEED: https://nuget.zontal.ghe.com/studio/index.json
+
+jobs:
+  test:
+    name: Test the patched code
+    runs-on: ubuntu-latest
+    steps:
+      # Nerdbank.GitVersioning computes the build version from the history.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.401'
+
+      # Same provisioning as .github/actions/run-dotnet-tests/action.yml, so the
+      # PKCS#11 store is tested against a real module.
+      - name: Set up a SoftHSM2 token
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y softhsm2 opensc libc6-dev
+          SOFTHSM_MODULE=$(ls /usr/lib/softhsm/libsofthsm2.so /usr/lib/*/softhsm/libsofthsm2.so 2>/dev/null | head -n1)
+          if ! ldconfig -p | grep -q "libdl\.so "; then
+            DL_STUB=$(ldconfig -p | awk '/libdl\.so\.2/ {print $NF; exit}')
+            sudo ln -sf "$DL_STUB" "$(dirname "$DL_STUB")/libdl.so"
+            sudo ldconfig
+          fi
+          export SOFTHSM2_CONF="$HOME/softhsm2.conf"
+          mkdir -p "$HOME/softhsm-tokens"
+          echo "directories.tokendir = $HOME/softhsm-tokens" > "$SOFTHSM2_CONF"
+          softhsm2-util --init-token --free --label opcua-test --pin 1234 --so-pin 123456
+          openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=Pkcs11TestServer" \
+            -keyout /tmp/pkcs11-key.pem -out /tmp/pkcs11-cert.pem
+          openssl rsa -in /tmp/pkcs11-key.pem -outform DER -out /tmp/pkcs11-key.der
+          openssl x509 -in /tmp/pkcs11-cert.pem -outform DER -out /tmp/pkcs11-cert.der
+          pkcs11-tool --module "$SOFTHSM_MODULE" --login --pin 1234 \
+            --write-object /tmp/pkcs11-key.der --type privkey --label opcua-server --id 01
+          pkcs11-tool --module "$SOFTHSM_MODULE" --login --pin 1234 \
+            --write-object /tmp/pkcs11-cert.der --type cert --label opcua-server --id 01
+          {
+            echo "SOFTHSM2_CONF=$SOFTHSM2_CONF"
+            echo "OPCUA_PKCS11_MODULE=$SOFTHSM_MODULE"
+            echo "OPCUA_PKCS11_TOKEN=opcua-test"
+            echo "OPCUA_PKCS11_PIN=1234"
+          } >> "$GITHUB_ENV"
+
+      - name: Run the tests of the patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          run() {
+            dotnet test "$1" -f net10.0 -c Release --filter "$2" --logger "console;verbosity=normal"
+          }
+          run tests/Opc.Ua.SourceGeneration.Core.Tests/Opc.Ua.SourceGeneration.Core.Tests.csproj \
+            "FullyQualifiedName~NodeSetValueAbsentTests"
+          run tests/Opc.Ua.SourceGeneration.Tests/Opc.Ua.SourceGeneration.Tests.csproj \
+            "FullyQualifiedName~NodesetExternalReferenceTargetTests"
+          run tests/Opc.Ua.Di.Tests/Opc.Ua.Di.Tests.csproj \
+            "FullyQualifiedName~NodeSetNodesOnlyAddressSpaceTests"
+          run tests/Opc.Ua.Security.Pkcs11.Tests/Opc.Ua.Security.Pkcs11.Tests.csproj \
+            "FullyQualifiedName~Opc.Ua.Security.Pkcs11"
+          run tests/Opc.Ua.PubSub.Server.Tests/Opc.Ua.PubSub.Server.Tests.csproj \
+            "FullyQualifiedName~PubSubNodeManager"
+          run tests/Opc.Ua.Server.Tests/Opc.Ua.Server.Tests.csproj \
+            "FullyQualifiedName~SubscriptionRestoreFailureTests|FullyQualifiedName~TrustListTests"
+          run tests/Opc.Ua.Client.Tests/Opc.Ua.Client.Tests.csproj \
+            "FullyQualifiedName~FileSystemClientMetadataTests|FullyQualifiedName~ManagedSessionRediscoveryValidationTests"
+          run tests/Opc.Ua.Redundancy.Server.Tests/Opc.Ua.Redundancy.Server.Tests.csproj \
+            "FullyQualifiedName~RaftSharedKeyValueStore"
+
+  pack:
+    name: Pack and push
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # The fork version replaces the Nerdbank.GitVersioning computation:
+      # version.props takes Version/PackageVersion from these variables when
+      # NBGV_PublicRelease is True (as the upstream release pipeline does).
+      NBGV_PublicRelease: 'True'
+      NBGV_NuGetPackageVersion: 2.0.0-zontal.1
+      NBGV_SimpleVersion: 2.0.0
+      NBGV_PrereleaseVersion: -zontal.1
+      NBGV_Version: 2.0.0.0
+      NBGV_AssemblyFileVersion: 2.0.0.0
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.401'
+
+      - name: Pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          projects=(
+            src/Opc.Ua.Types/Opc.Ua.Types.csproj
+            src/Opc.Ua.Security.Certificates/Opc.Ua.Security.Certificates.csproj
+            src/Opc.Ua.Core.Types/Opc.Ua.Core.Types.csproj
+            src/Opc.Ua.Core.Schema/Opc.Ua.Core.Schema.csproj
+            src/Opc.Ua.Core/Opc.Ua.Core.csproj
+            src/Opc.Ua.Configuration/Opc.Ua.Configuration.csproj
+            src/Opc.Ua.Server/Opc.Ua.Server.csproj
+            src/Opc.Ua.Client/Opc.Ua.Client.csproj
+            src/Opc.Ua.PubSub/Opc.Ua.PubSub.csproj
+            src/Opc.Ua.PubSub.Udp/Opc.Ua.PubSub.Udp.csproj
+            src/Opc.Ua.PubSub.Mqtt/Opc.Ua.PubSub.Mqtt.csproj
+            src/Opc.Ua.PubSub.Kafka/Opc.Ua.PubSub.Kafka.csproj
+            src/Opc.Ua.PubSub.Server/Opc.Ua.PubSub.Server.csproj
+            src/Opc.Ua.Gds/Opc.Ua.Gds.csproj
+            src/Opc.Ua.Gds.Client/Opc.Ua.Gds.Client.csproj
+            src/Opc.Ua.Gds.Server/Opc.Ua.Gds.Server.csproj
+            src/Opc.Ua.Di/Opc.Ua.Di.csproj
+            src/Opc.Ua.Di.Server/Opc.Ua.Di.Server.csproj
+            src/Opc.Ua.Di.Client/Opc.Ua.Di.Client.csproj
+            src/Opc.Ua.Security.Pkcs11/Opc.Ua.Security.Pkcs11.csproj
+            src/Opc.Ua.Redundancy/Opc.Ua.Redundancy.csproj
+            src/Opc.Ua.Redundancy.Server/Opc.Ua.Redundancy.Server.csproj
+            tools/Opc.Ua.SourceGeneration.Pack/Opc.Ua.SourceGeneration.Pack.csproj
+            tools/Opc.Ua.MigrationAnalyzer/Opc.Ua.MigrationAnalyzer.csproj
+          )
+          # The migration analyzer pack builds its Roslyn variants through MSBuild
+          # tasks, which do not restore them.
+          for project in tools/Opc.Ua.MigrationAnalyzer*/*.csproj; do
+            dotnet restore "$project"
+          done
+          for project in "${projects[@]}"; do
+            # _IsPreviewPackage=false keeps the Redundancy packages, which
+            # upstream ships as previews, at the fork version as well.
+            dotnet pack "$project" -c Release -o artifacts \
+              -p:_IsPreviewPackage=false \
+              -p:IncludeSymbols=false \
+              -p:RepositoryUrl="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          done
+          ls -l artifacts
+
+      - name: Check package versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for package in artifacts/*.nupkg; do
+            version=$(unzip -p "$package" '*.nuspec' | grep -oPm1 '(?<=<version>)[^<]+')
+            echo "$(basename "$package"): $version"
+            test "$version" = "$PACKAGE_VERSION"
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packages
+          path: artifacts/*.nupkg
+
+      - name: Push to the studio feed
+        if: github.event_name == 'push' || inputs.publish
+        shell: bash
+        env:
+          NUGET_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          dotnet nuget add source "$NUGET_FEED" --name studio \
+            --username "$GITHUB_ACTOR" --password "$NUGET_TOKEN" --store-password-in-clear-text
+          dotnet nuget push "artifacts/*.nupkg" --source studio --api-key "$NUGET_TOKEN" --skip-duplicate
+
+  verify:
+    name: Verify the feed
+    needs: pack
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.401'
+
+      - name: List the published versions
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          host="${GITHUB_SERVER_URL#https://}"
+          for id in OPCFoundation.NetStandard.Opc.Ua.Core OPCFoundation.NetStandard.Opc.Ua.Redundancy; do
+            versions=$(GH_HOST="$host" gh api "/orgs/studio/packages/nuget/$id/versions" --jq '.[].name')
+            echo "$id: $versions"
+            echo "$versions" | grep -qx "$PACKAGE_VERSION"
+          done
+
+      - name: Restore a package through the feed
+        shell: bash
+        env:
+          NUGET_USER: ${{ github.actor }}
+          NUGET_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir restore-check && cd restore-check
+          cat > nuget.config <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+              <add key="studio" value="$NUGET_FEED" />
+            </packageSources>
+            <packageSourceMapping>
+              <packageSource key="studio">
+                <package pattern="OPCFoundation.NetStandard.Opc.Ua.*" />
+              </packageSource>
+              <packageSource key="nuget.org">
+                <package pattern="*" />
+              </packageSource>
+            </packageSourceMapping>
+            <packageSourceCredentials>
+              <studio>
+                <add key="Username" value="%NUGET_USER%" />
+                <add key="ClearTextPassword" value="%NUGET_TOKEN%" />
+              </studio>
+            </packageSourceCredentials>
+          </configuration>
+          EOF
+          dotnet new console --framework net10.0 --name RestoreCheck --output . --no-restore
+          dotnet add package OPCFoundation.NetStandard.Opc.Ua.Client --version "$PACKAGE_VERSION"
+          dotnet restore
+          grep -q "opcfoundation.netstandard.opc.ua.client/$PACKAGE_VERSION" obj/project.assets.json
