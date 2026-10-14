@@ -297,9 +297,9 @@ namespace Opc.Ua.Security.Pkcs11
         {
             Pkcs11Token token = GetToken();
             byte[] encoded = certificate.RawData;
-            IReadOnlyList<KeyValuePair<byte[], byte[]>> onToken = token.FindCertificatesWithIds();
+            IReadOnlyList<KeyValuePair<byte[], byte[]?>> onToken = token.FindCertificatesWithIds();
 
-            foreach (KeyValuePair<byte[], byte[]> entry in onToken)
+            foreach (KeyValuePair<byte[], byte[]?> entry in onToken)
             {
                 if (entry.Key.AsSpan().SequenceEqual(encoded))
                 {
@@ -329,7 +329,7 @@ namespace Opc.Ua.Security.Pkcs11
         private byte[] SelectObjectId(
             Pkcs11Token token,
             Certificate certificate,
-            IReadOnlyList<KeyValuePair<byte[], byte[]>> onToken)
+            IReadOnlyList<KeyValuePair<byte[], byte[]?>> onToken)
         {
             if (m_options != null && !m_options.ObjectId.IsNull && m_options.ObjectId.Length > 0)
             {
@@ -338,9 +338,9 @@ namespace Opc.Ua.Security.Pkcs11
 
             byte[] publicKey = certificate.PublicKey.EncodedKeyValue.RawData;
 
-            foreach (KeyValuePair<byte[], byte[]> entry in onToken)
+            foreach (KeyValuePair<byte[], byte[]?> entry in onToken)
             {
-                if (entry.Value.Length == 0)
+                if (entry.Value is not { Length: > 0 } candidateId)
                 {
                     continue;
                 }
@@ -349,7 +349,7 @@ namespace Opc.Ua.Security.Pkcs11
 
                 if (HasSamePublicKey(candidate, certificate))
                 {
-                    return entry.Value;
+                    return candidateId;
                 }
             }
 
@@ -538,13 +538,17 @@ namespace Opc.Ua.Security.Pkcs11
 
             Pkcs11Token token = GetToken();
 
-            foreach (KeyValuePair<byte[], byte[]> entry in token.FindCertificatesWithIds())
+            foreach (KeyValuePair<byte[], byte[]?> entry in token.FindCertificatesWithIds())
             {
                 Certificate candidate = Certificate.FromRawData(entry.Key);
 
                 try
                 {
-                    if (!Matches(candidate, thumbprint, subjectName, applicationUri, certificateType))
+                    // A certificate whose CKA_ID cannot be read cannot be linked
+                    // to its key; an empty id would select a key by the options
+                    // alone, which may belong to another certificate.
+                    if (entry.Value == null ||
+                        !Matches(candidate, thumbprint, subjectName, applicationUri, certificateType))
                     {
                         continue;
                     }

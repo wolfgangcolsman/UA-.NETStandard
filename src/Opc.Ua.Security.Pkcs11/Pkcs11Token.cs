@@ -237,8 +237,10 @@ namespace Opc.Ua.Security.Pkcs11
         /// </summary>
         /// <returns>
         /// Pairs of DER encoded certificate and the CKA_ID that links it to a key.
+        /// The CKA_ID is <c>null</c> when the token reports that it cannot be
+        /// read; such a certificate must not be paired with a key.
         /// </returns>
-        public IReadOnlyList<KeyValuePair<byte[], byte[]>> FindCertificatesWithIds()
+        public IReadOnlyList<KeyValuePair<byte[], byte[]?>> FindCertificatesWithIds()
         {
             lock (m_lock)
             {
@@ -251,7 +253,7 @@ namespace Opc.Ua.Security.Pkcs11
 
                 AddObjectFilters(search);
 
-                var results = new List<KeyValuePair<byte[], byte[]>>();
+                var results = new List<KeyValuePair<byte[], byte[]?>>();
 
                 foreach (IObjectHandle handle in m_session.FindAllObjects(search))
                 {
@@ -263,9 +265,9 @@ namespace Opc.Ua.Security.Pkcs11
 
                     if (encoded is { Length: > 0 })
                     {
-                        results.Add(new KeyValuePair<byte[], byte[]>(
+                        results.Add(new KeyValuePair<byte[], byte[]?>(
                             encoded,
-                            ReadBytes(values[1]) ?? []));
+                            ReadBytes(values[1])));
                     }
                 }
 

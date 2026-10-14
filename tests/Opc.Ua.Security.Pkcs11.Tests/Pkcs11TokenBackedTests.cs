@@ -151,7 +151,7 @@ namespace Opc.Ua.Security.Pkcs11.Tests
             using Pkcs11Token token = module.OpenToken();
 
             IReadOnlyList<byte[]> certificates = token.FindCertificates();
-            IReadOnlyList<KeyValuePair<byte[], byte[]>> withIds = token.FindCertificatesWithIds();
+            IReadOnlyList<KeyValuePair<byte[], byte[]?>> withIds = token.FindCertificatesWithIds();
 
             Assert.Multiple(() =>
             {
@@ -454,6 +454,32 @@ namespace Opc.Ua.Security.Pkcs11.Tests
             {
                 Assert.That(module.CertificateId(encoded), Is.Not.Null);
                 Assert.That(module.CertificateId(encoded), Is.Not.EqualTo(module.RsaId));
+            });
+        }
+
+        [Test]
+        public async Task CertificateWhoseIdCannotBeReadIsNotPairedWithAnUnrelatedKeyAsync()
+        {
+            using var module = new FakePkcs11Module();
+            using Pkcs11CertificateStore store = OpenStore(module);
+            using Certificate peer = CreatePeerCertificate("CN=UnrelatedPeer");
+            await store.AddAsync(peer).ConfigureAwait(false);
+            module.UnreadableAttributes.Add((ulong)CKA.CKA_ID);
+
+            using Certificate? loaded = await store
+                .LoadPrivateKeyAsync(peer.Thumbprint, null, null, NodeId.Null, null)
+                .ConfigureAwait(false);
+            using CertificateCollection found = await store
+                .FindByThumbprintAsync(peer.Thumbprint)
+                .ConfigureAwait(false);
+            using Certificate other = CreatePeerCertificate("CN=AnotherPeer");
+            await store.AddAsync(other).ConfigureAwait(false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(loaded, Is.Null, "the token's RSA key belongs to another certificate");
+                Assert.That(found, Has.Count.EqualTo(1), "the certificate itself is still found");
+                Assert.That(module.CertificateId(other.RawData), Is.Not.Null, "adding still works");
             });
         }
 
