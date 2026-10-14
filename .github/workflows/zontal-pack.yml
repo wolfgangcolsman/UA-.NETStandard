@@ -47,6 +47,17 @@ jobs:
         with:
           dotnet-version: '10.0.401'
 
+      # NuGet.config takes the RaftCs packages from the studio feed (see NOTICE.md). They are
+      # published by studio/raft-cs, whose packages the workflow token of this repository
+      # cannot read, so the restore uses the organization's CI packages token.
+      - name: Add the studio feed credentials
+        shell: bash
+        env:
+          NUGET_TOKEN: ${{ secrets.GHE_PACKAGES_CI_TOKEN }}
+        run: |
+          dotnet nuget update source studio --configfile NuGet.config \
+            --username "$GITHUB_ACTOR" --password "$NUGET_TOKEN" --store-password-in-clear-text
+
       # Same provisioning as .github/actions/run-dotnet-tests/action.yml, so the
       # PKCS#11 store is tested against a real module.
       - name: Set up a SoftHSM2 token
@@ -128,6 +139,17 @@ jobs:
         with:
           dotnet-version: '10.0.401'
 
+      # NuGet.config takes the RaftCs packages from the studio feed (see NOTICE.md). They are
+      # published by studio/raft-cs, whose packages the workflow token of this repository
+      # cannot read, so the restore uses the organization's CI packages token.
+      - name: Add the studio feed credentials
+        shell: bash
+        env:
+          NUGET_TOKEN: ${{ secrets.GHE_PACKAGES_CI_TOKEN }}
+        run: |
+          dotnet nuget update source studio --configfile NuGet.config \
+            --username "$GITHUB_ACTOR" --password "$NUGET_TOKEN" --store-password-in-clear-text
+
       - name: Pack
         shell: bash
         run: |
@@ -199,7 +221,7 @@ jobs:
           NUGET_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          dotnet nuget add source "$NUGET_FEED" --name studio \
+          dotnet nuget update source studio --configfile NuGet.config \
             --username "$GITHUB_ACTOR" --password "$NUGET_TOKEN" --store-password-in-clear-text
           dotnet nuget push "artifacts/*.nupkg" --source studio --api-key "$NUGET_TOKEN" --skip-duplicate
 
