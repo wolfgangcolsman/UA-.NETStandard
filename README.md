@@ -1,5 +1,12 @@
 # OPC UA .NET Standard Stack
 
+> **ZONTAL-patched fork.** This repository is ZONTAL's fork of the OPC
+> Foundation UA-.NETStandard stack at tag `2.0.0` with the patches listed in
+> [NOTICE.md](NOTICE.md). Its packages keep the OPC Foundation package ids and
+> carry the version `2.0.0-zontal.1`; they are built without the OPC Foundation
+> strong-name key. It is not an official OPC Foundation release. The OPC
+> Foundation MIT License 1.00 ([LICENSE.txt](LICENSE.txt)) applies unchanged.
+
 [![Release](https://img.shields.io/github/v/release/OPCFoundation/UA-.NETStandard?style=flat)](https://github.com/OPCFoundation/UA-.NETStandard/releases)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/OPCFoundation.NetStandard.Opc.Ua)](https://www.nuget.org/packages/OPCFoundation.NetStandard.Opc.Ua/)
 [![CI](https://github.com/OPCFoundation/UA-.NETStandard/actions/workflows/buildandtest.yml/badge.svg?branch=master)](https://github.com/OPCFoundation/UA-.NETStandard/actions/workflows/buildandtest.yml?query=branch%3Amaster)
