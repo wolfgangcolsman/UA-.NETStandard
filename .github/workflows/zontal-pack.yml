@@ -2,8 +2,8 @@ name: ZONTAL pack
 
 # Builds and tests the ZONTAL-patched stack (see NOTICE.md), packs the
 # OPCFoundation.NetStandard.Opc.Ua.* packages at the fork version and pushes
-# them to the NuGet feed of the organization that owns this repository:
-# GitHub Packages on github.com, or the enterprise feed on a GHE.com instance.
+# them to the zontal GitHub Packages feed and to the static feed
+# https://zontal.github.io/nuget-feed/index.json, which restores without credentials.
 
 on:
   push:
@@ -11,9 +11,13 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Push the packages to the organization's NuGet feed
+        description: Push the packages to GitHub Packages and the static feed
         type: boolean
         default: false
+      include_redundancy:
+        description: Pack the Redundancy packages as well
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -26,6 +30,9 @@ env:
   DOTNET_NOLOGO: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
   PACKAGE_VERSION: 2.0.0-zontal.1
+  NUGET_FEED: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+  # A tag push always packs every package.
+  INCLUDE_REDUNDANCY: ${{ github.event_name == 'push' || inputs.include_redundancy }}
 
 jobs:
   test:
@@ -105,8 +112,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    outputs:
-      feed: ${{ steps.feed.outputs.url }}
     env:
       # The fork version replaces the Nerdbank.GitVersioning computation:
       # version.props takes Version/PackageVersion from these variables when
@@ -118,20 +123,6 @@ jobs:
       NBGV_Version: 2.0.0.0
       NBGV_AssemblyFileVersion: 2.0.0.0
     steps:
-      - name: Resolve the feed
-        id: feed
-        shell: bash
-        run: |
-          set -euo pipefail
-          host="${GITHUB_SERVER_URL#https://}"
-          if [ "$host" = github.com ]; then
-            url="https://nuget.pkg.github.com/$GITHUB_REPOSITORY_OWNER/index.json"
-          else
-            url="https://nuget.$host/$GITHUB_REPOSITORY_OWNER/index.json"
-          fi
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-          echo "NUGET_FEED=$url" >> "$GITHUB_ENV"
-
       - uses: actions/checkout@v7
 
       - uses: actions/setup-dotnet@v6
@@ -163,11 +154,15 @@ jobs:
             src/Opc.Ua.Di.Server/Opc.Ua.Di.Server.csproj
             src/Opc.Ua.Di.Client/Opc.Ua.Di.Client.csproj
             src/Opc.Ua.Security.Pkcs11/Opc.Ua.Security.Pkcs11.csproj
-            src/Opc.Ua.Redundancy/Opc.Ua.Redundancy.csproj
-            src/Opc.Ua.Redundancy.Server/Opc.Ua.Redundancy.Server.csproj
             tools/Opc.Ua.SourceGeneration.Pack/Opc.Ua.SourceGeneration.Pack.csproj
             tools/Opc.Ua.MigrationAnalyzer/Opc.Ua.MigrationAnalyzer.csproj
           )
+          if [ "$INCLUDE_REDUNDANCY" = 'true' ]; then
+            projects+=(
+              src/Opc.Ua.Redundancy/Opc.Ua.Redundancy.csproj
+              src/Opc.Ua.Redundancy.Server/Opc.Ua.Redundancy.Server.csproj
+            )
+          fi
           # The migration analyzer pack builds its Roslyn variants through MSBuild
           # tasks, which do not restore them.
           for project in tools/Opc.Ua.MigrationAnalyzer*/*.csproj; do
@@ -198,27 +193,25 @@ jobs:
           name: packages
           path: artifacts/*.nupkg
 
-      - name: Push to the feed
+      - name: Push to GitHub Packages
         if: github.event_name == 'push' || inputs.publish
         shell: bash
         env:
           NUGET_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          dotnet nuget add source "$NUGET_FEED" --name fork \
+          dotnet nuget add source "$NUGET_FEED" --name zontal \
             --username "$GITHUB_ACTOR" --password "$NUGET_TOKEN" --store-password-in-clear-text
-          dotnet nuget push "artifacts/*.nupkg" --source fork --api-key "$NUGET_TOKEN" --skip-duplicate
+          dotnet nuget push "artifacts/*.nupkg" --source zontal --api-key "$NUGET_TOKEN" --skip-duplicate
 
   verify:
-    name: Verify the feed
+    name: Verify GitHub Packages
     needs: pack
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
-    env:
-      NUGET_FEED: ${{ needs.pack.outputs.feed }}
     steps:
       - uses: actions/setup-dotnet@v6
         with:
@@ -230,9 +223,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          host="${GITHUB_SERVER_URL#https://}"
-          for id in OPCFoundation.NetStandard.Opc.Ua.Core OPCFoundation.NetStandard.Opc.Ua.Redundancy; do
-            versions=$(GH_HOST="$host" gh api "/orgs/$GITHUB_REPOSITORY_OWNER/packages/nuget/$id/versions" --jq '.[].name')
+          ids=(OPCFoundation.NetStandard.Opc.Ua.Core)
+          if [ "$INCLUDE_REDUNDANCY" = 'true' ]; then
+            ids+=(OPCFoundation.NetStandard.Opc.Ua.Redundancy)
+          fi
+          for id in "${ids[@]}"; do
+            versions=$(gh api "/orgs/$GITHUB_REPOSITORY_OWNER/packages/nuget/$id/versions" --jq '.[].name')
             echo "$id: $versions"
             echo "$versions" | grep -qx "$PACKAGE_VERSION"
           done
@@ -251,10 +247,10 @@ jobs:
             <packageSources>
               <clear />
               <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
-              <add key="fork" value="$NUGET_FEED" />
+              <add key="zontal" value="$NUGET_FEED" />
             </packageSources>
             <packageSourceMapping>
-              <packageSource key="fork">
+              <packageSource key="zontal">
                 <package pattern="OPCFoundation.NetStandard.Opc.Ua.*" />
               </packageSource>
               <packageSource key="nuget.org">
@@ -262,10 +258,10 @@ jobs:
               </packageSource>
             </packageSourceMapping>
             <packageSourceCredentials>
-              <fork>
+              <zontal>
                 <add key="Username" value="%NUGET_USER%" />
                 <add key="ClearTextPassword" value="%NUGET_TOKEN%" />
-              </fork>
+              </zontal>
             </packageSourceCredentials>
           </configuration>
           EOF
@@ -273,3 +269,13 @@ jobs:
           dotnet add package OPCFoundation.NetStandard.Opc.Ua.Client --version "$PACKAGE_VERSION"
           dotnet restore
           grep -q "opcfoundation.netstandard.opc.ua.client/$PACKAGE_VERSION" obj/project.assets.json
+
+  static-feed:
+    name: Static feed
+    needs: verify
+    if: github.event_name == 'push' || inputs.publish
+    uses: zontal/nuget-feed/.github/workflows/publish.yml@main
+    with:
+      artifact: packages
+    secrets:
+      feed_deploy_key: ${{ secrets.NUGET_FEED_DEPLOY_KEY }}
