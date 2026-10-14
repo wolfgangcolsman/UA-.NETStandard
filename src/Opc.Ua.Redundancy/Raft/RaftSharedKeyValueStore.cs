@@ -491,11 +491,15 @@ namespace Opc.Ua.Redundancy
             {
                 commitCts.CancelAfter(m_commitTimeout);
             }
+            // A snapshot capture is only discarded together with the proposal
+            // it belongs to: whoever claims the pending proposal (the applier,
+            // this callback, or a failed propose) also settles the capture, so
+            // a proposal that succeeds always finds its capture completed.
             using CancellationTokenRegistration reg = commitCts.Token.Register(() =>
             {
-                m_snapshotCaptures.TryRemove(requestId, out _);
                 if (m_pending.TryRemove(requestId, out TaskCompletionSource<bool>? pending))
                 {
+                    m_snapshotCaptures.TryRemove(requestId, out _);
                     if (ct.IsCancellationRequested)
                     {
                         pending.TrySetCanceled(ct);
@@ -524,14 +528,18 @@ namespace Opc.Ua.Redundancy
                     !disposeToken.IsCancellationRequested &&
                     commitCts.IsCancellationRequested)
             {
-                m_pending.TryRemove(requestId, out _);
-                m_snapshotCaptures.TryRemove(requestId, out _);
+                if (m_pending.TryRemove(requestId, out _))
+                {
+                    m_snapshotCaptures.TryRemove(requestId, out _);
+                }
                 throw CreateCommitTimeoutException();
             }
             catch
             {
-                m_pending.TryRemove(requestId, out _);
-                m_snapshotCaptures.TryRemove(requestId, out _);
+                if (m_pending.TryRemove(requestId, out _))
+                {
+                    m_snapshotCaptures.TryRemove(requestId, out _);
+                }
                 throw;
             }
 

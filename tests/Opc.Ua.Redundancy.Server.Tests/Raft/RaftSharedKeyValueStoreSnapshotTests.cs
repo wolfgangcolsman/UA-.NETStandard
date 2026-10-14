@@ -126,6 +126,47 @@ namespace Opc.Ua.Server.Tests.Redundancy
         }
 
         [Test]
+        public async Task CancelledSnapshotDoesNotHangAndTheStoreGoesOnAsync()
+        {
+            var consensus = new ScriptedConsensus(autoCommit: false);
+            await using var store = new RaftSharedKeyValueStore(consensus, ownsConsensus: true);
+            using var cancellation = new CancellationTokenSource();
+
+            Task<RaftKeyValueSnapshot> snapshot = store.CreateSnapshotAsync(cancellation.Token).AsTask();
+            await cancellation.CancelAsync();
+            await consensus.CommitAsync(1);
+
+            Assert.CatchAsync<OperationCanceledException>(
+                async () => await snapshot.WaitAsync(TimeSpan.FromSeconds(10)));
+            ValueTask<RaftKeyValueSnapshot> next = store.CreateSnapshotAsync();
+            await consensus.CommitAsync(1);
+            Assert.That((await next).LastIncludedCommand, Is.EqualTo(2));
+        }
+
+        [Test]
+        public async Task SnapshotCancelledWhileItsBarrierIsAppliedCompletesAsync()
+        {
+            var consensus = new ScriptedConsensus(autoCommit: true);
+            await using var store = new RaftSharedKeyValueStore(consensus, ownsConsensus: true);
+            await store.SetAsync("a", ByteString.From(new byte[] { 1 }));
+
+            // The barrier is committed and the token cancelled at once, so the
+            // applier and the cancellation race for the proposal. Either side
+            // may win, but the snapshot must always complete one way or the
+            // other.
+            for (int ii = 0; ii < 200; ii++)
+            {
+                using var cancellation = new CancellationTokenSource();
+                consensus.AfterPropose = cancellation.Cancel;
+                Task<RaftKeyValueSnapshot> snapshot = store.CreateSnapshotAsync(cancellation.Token).AsTask();
+                Task finished = await Task.WhenAny(snapshot, Task.Delay(TimeSpan.FromSeconds(10)));
+                Assert.That(finished, Is.SameAs(snapshot), "iteration " + ii + " did not complete");
+                Assert.That(snapshot.Status, Is.EqualTo(TaskStatus.RanToCompletion).Or.EqualTo(TaskStatus.Canceled));
+            }
+            consensus.AfterPropose = null;
+        }
+
+        [Test]
         public async Task LogAppliedAfterTheSnapshotBuildsOnItAsync()
         {
             await using var source = new RaftSharedKeyValueStore();
@@ -373,6 +414,8 @@ namespace Opc.Ua.Server.Tests.Redundancy
 
             public Task StartCalled => m_startCalled.Task;
 
+            public Action? AfterPropose { get; set; }
+
             public async ValueTask StartAsync(CancellationToken ct = default)
             {
                 m_startCalled.TrySetResult(true);
@@ -399,6 +442,7 @@ namespace Opc.Ua.Server.Tests.Redundancy
                 {
                     m_proposed.Writer.TryWrite(copy);
                 }
+                AfterPropose?.Invoke();
                 return default;
             }
 
