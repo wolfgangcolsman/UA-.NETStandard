@@ -1954,7 +1954,7 @@ namespace Opc.Ua.Schema.Model
         /// and the reference used to be dropped. The stand-in carries only
         /// the NodeId the generated reference needs and is not generated.
         /// </summary>
-        private NodeDesign? FindOrCreateExternalTarget(NodeId targetId, NodeId sourceId)
+        private ObjectDesign? FindOrCreateExternalTarget(NodeId targetId, NodeId sourceId)
         {
             if (targetId.IsNull ||
                 targetId.NamespaceIndex == 0 ||
