@@ -216,6 +216,11 @@ jobs:
         with:
           dotnet-version: '10.0.401'
 
+      - uses: actions/download-artifact@v7
+        with:
+          name: packages
+          path: packed
+
       - name: List the published versions
         shell: bash
         env:
@@ -223,11 +228,8 @@ jobs:
         run: |
           set -euo pipefail
           host="${GITHUB_SERVER_URL#https://}"
-          ids=(OPCFoundation.NetStandard.Opc.Ua.Core)
-          if [ "$INCLUDE_REDUNDANCY" = 'true' ]; then
-            ids+=(OPCFoundation.NetStandard.Opc.Ua.Redundancy)
-          fi
-          for id in "${ids[@]}"; do
+          for package in packed/*.nupkg; do
+            id=$(basename "$package" ".$PACKAGE_VERSION.nupkg")
             versions=$(GH_HOST="$host" gh api "/orgs/studio/packages/nuget/$id/versions" --jq '.[].name')
             echo "$id: $versions"
             echo "$versions" | grep -qx "$PACKAGE_VERSION"
