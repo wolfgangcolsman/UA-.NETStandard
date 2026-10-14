@@ -259,13 +259,13 @@ namespace Opc.Ua.Security.Pkcs11
                         handle,
                         [(ulong)CKA.CKA_VALUE, (ulong)CKA.CKA_ID]);
 
-                    byte[] encoded = values[0].GetValueAsByteArray();
+                    byte[]? encoded = ReadBytes(values[0]);
 
                     if (encoded is { Length: > 0 })
                     {
                         results.Add(new KeyValuePair<byte[], byte[]>(
                             encoded,
-                            values[1].GetValueAsByteArray() ?? []));
+                            ReadBytes(values[1]) ?? []));
                     }
                 }
 
@@ -342,7 +342,7 @@ namespace Opc.Ua.Security.Pkcs11
                         handle,
                         [(ulong)CKA.CKA_VALUE]);
 
-                    byte[] encoded = values[0].GetValueAsByteArray();
+                    byte[]? encoded = ReadBytes(values[0]);
 
                     if (encoded is { Length: > 0 } && match(encoded))
                     {
@@ -402,7 +402,7 @@ namespace Opc.Ua.Security.Pkcs11
                         continue;
                     }
 
-                    byte[]? id = values[0].GetValueAsByteArray();
+                    byte[]? id = ReadBytes(values[0]);
 
                     if (id is { Length: > 0 })
                     {
@@ -623,7 +623,7 @@ namespace Opc.Ua.Security.Pkcs11
         {
             for (int ii = 1; ii < match.Length; ii++)
             {
-                byte[]? actual = values[ii].GetValueAsByteArray();
+                byte[]? actual = ReadBytes(values[ii]);
 
                 if (actual == null || actual.Length == 0)
                 {
@@ -641,6 +641,16 @@ namespace Opc.Ua.Security.Pkcs11
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Reads a byte array attribute, or returns <c>null</c> when the token
+        /// reports that the attribute cannot be read (it does not exist on the
+        /// object or is sensitive); reading such an attribute's value throws.
+        /// </summary>
+        private static byte[]? ReadBytes(IObjectAttribute attribute)
+        {
+            return attribute.CannotBeRead ? null : attribute.GetValueAsByteArray();
         }
 
         private static ReadOnlySpan<byte> TrimLeadingZeros(byte[] value)

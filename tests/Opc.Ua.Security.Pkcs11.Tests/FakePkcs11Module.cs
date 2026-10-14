@@ -332,7 +332,15 @@ namespace Opc.Ua.Security.Pkcs11.Tests
             {
                 var value = new Mock<IObjectAttribute>();
 
-                if (attribute == (ulong)CKA.CKA_VALUE)
+                if (UnreadableAttributes.Contains(attribute))
+                {
+                    // As Pkcs11Interop: the value of an attribute the token
+                    // reports as unreadable cannot be retrieved.
+                    value.SetupGet(a => a.CannotBeRead).Returns(true);
+                    value.Setup(a => a.GetValueAsByteArray())
+                        .Throws(new InvalidOperationException("The attribute cannot be read."));
+                }
+                else if (attribute == (ulong)CKA.CKA_VALUE)
                 {
                     value.Setup(a => a.GetValueAsByteArray()).Returns(target.Value);
                 }
@@ -607,6 +615,12 @@ namespace Opc.Ua.Security.Pkcs11.Tests
         {
             return m_objects.Count(o => o.ObjectClass == (ulong)objectClass);
         }
+
+        /// <summary>
+        /// Attributes the token reports as unreadable (CKR_ATTRIBUTE_TYPE_INVALID
+        /// or CKR_ATTRIBUTE_SENSITIVE) on every object.
+        /// </summary>
+        public HashSet<ulong> UnreadableAttributes { get; } = [];
 
         /// <summary>
         /// Replaces the curve (CKA_EC_PARAMS) of the EC public key object, so

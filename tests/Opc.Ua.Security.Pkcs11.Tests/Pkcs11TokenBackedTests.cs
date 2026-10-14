@@ -457,6 +457,29 @@ namespace Opc.Ua.Security.Pkcs11.Tests
             });
         }
 
+        [Test]
+        public async Task StoreAddSkipsAKeyWhoseExponentCannotBeReadAsync()
+        {
+            using var module = new FakePkcs11Module();
+            using Pkcs11CertificateStore store = OpenStore(module);
+            using Certificate identity = Certificate.FromRawData(module.RsaCertificate);
+            Assert.That(await store.DeleteAsync(identity.Thumbprint).ConfigureAwait(false), Is.True);
+            module.UnreadableAttributes.Add((ulong)CKA.CKA_PUBLIC_EXPONENT);
+            byte[] encoded = module.IssueRsaCertificate("CN=RenewedUnreadable");
+            using Certificate renewed = Certificate.FromRawData(encoded);
+
+            await store.AddAsync(renewed).ConfigureAwait(false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(module.CertificateId(encoded), Is.Not.Null, "the certificate is still written");
+                Assert.That(
+                    module.CertificateId(encoded),
+                    Is.Not.EqualTo(module.RsaId),
+                    "a key that cannot prove the whole public key is not paired");
+            });
+        }
+
         [TestCase(false)]
         [TestCase(true)]
         public async Task StoreAddLinksAnEccCertificateOnlyToAKeyOnTheSameCurveAsync(bool otherCurve)
