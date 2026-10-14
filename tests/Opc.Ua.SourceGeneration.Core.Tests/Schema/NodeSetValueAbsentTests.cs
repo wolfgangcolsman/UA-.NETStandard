@@ -105,6 +105,22 @@ namespace Opc.Ua.Schema.Model.Tests
         }
 
         [Test]
+        public void SubtypeWithoutValueDoesNotInheritTheValueOfItsSupertype()
+        {
+            string generated = GenerateDeviceSetPump();
+            string supertype = ExtractMethodBody(generated, "CreateInstanceOfRatedFlowVariableType");
+            string subtype = ExtractMethodBody(generated, "CreateInstanceOfUnratedFlowVariableType");
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(supertype, Does.Contain("42.5"), "the supertype keeps its declared Value");
+                Assert.That(subtype, Does.Contain(NullValue));
+                Assert.That(subtype, Does.Not.Contain("42.5"));
+                Assert.That(subtype, Does.Not.Contain("(double)0"));
+            });
+        }
+
+        [Test]
         public void DependencyPayloadCarriesTheAbsentValue()
         {
             var dependency = new ModelDependencyV1 { ModelUri = "http://test.org/UA/ValueAbsent/" };
@@ -201,6 +217,21 @@ namespace Opc.Ua.Schema.Model.Tests
                     <DisplayName>FlowVariableType</DisplayName>
                     <References>
                         <Reference ReferenceType="HasSubtype" IsForward="false">i=63</Reference>
+                    </References>
+                </UAVariableType>
+                <UAVariableType NodeId="ns=1;i=2001" BrowseName="1:RatedFlowVariableType" DataType="Double">
+                    <DisplayName>RatedFlowVariableType</DisplayName>
+                    <References>
+                        <Reference ReferenceType="HasSubtype" IsForward="false">i=63</Reference>
+                    </References>
+                    <Value>
+                        <Double xmlns="http://opcfoundation.org/UA/2008/02/Types.xsd">42.5</Double>
+                    </Value>
+                </UAVariableType>
+                <UAVariableType NodeId="ns=1;i=2002" BrowseName="1:UnratedFlowVariableType" DataType="Double">
+                    <DisplayName>UnratedFlowVariableType</DisplayName>
+                    <References>
+                        <Reference ReferenceType="HasSubtype" IsForward="false">ns=1;i=2001</Reference>
                     </References>
                 </UAVariableType>
             </UANodeSet>
