@@ -817,6 +817,13 @@ namespace Opc.Ua.Client.FileSystem
             bool copy,
             CancellationToken ct)
         {
+            // Reject a detached file before the destination is resolved: the
+            // operation cannot succeed, and resolving the destination could
+            // fail first with a misleading error and cost server requests.
+            if (source is UaFileInfo { IsDetached: true })
+            {
+                throw DetachedFileError(source, copy ? "copied" : "moved");
+            }
             QualifiedName[] segments = UaPath.Parse(destPath);
             if (segments.Length == 0)
             {

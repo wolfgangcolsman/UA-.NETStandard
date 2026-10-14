@@ -219,12 +219,19 @@ namespace Opc.Ua.Client.Tests.FileSystem
             });
 
             int callsBeforeOperations = harness.CallRequests.Count;
+            int invocationsBeforeOperations = harness.SessionMock.Invocations.Count;
             InvalidOperationException? delete = Assert.ThrowsAsync<InvalidOperationException>(
                 async () => await file.DeleteAsync().ConfigureAwait(false));
             InvalidOperationException? move = Assert.ThrowsAsync<InvalidOperationException>(
                 async () => await file.MoveToAsync(client.Root, "moved.bin").ConfigureAwait(false));
             InvalidOperationException? copy = Assert.ThrowsAsync<InvalidOperationException>(
                 async () => await file.CopyToAsync("/copied.bin").ConfigureAwait(false));
+            // A nested destination is not resolved first: the directory does
+            // not exist, and the detached file is still the reason given.
+            InvalidOperationException? nestedMove = Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await file.MoveToAsync("/missing/moved.bin").ConfigureAwait(false));
+            InvalidOperationException? nestedCopy = Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await file.CopyToAsync("/missing/copied.bin").ConfigureAwait(false));
             IOException? root = Assert.ThrowsAsync<IOException>(
                 async () => await client.Root.DeleteAsync().ConfigureAwait(false));
 
@@ -233,8 +240,11 @@ namespace Opc.Ua.Client.Tests.FileSystem
                 Assert.That(delete!.Message, Does.Contain("cannot be deleted").And.Contain("not known"));
                 Assert.That(move!.Message, Does.Contain("cannot be moved").And.Contain("not known"));
                 Assert.That(copy!.Message, Does.Contain("cannot be copied").And.Contain("not known"));
+                Assert.That(nestedMove!.Message, Does.Contain("cannot be moved").And.Contain("not known"));
+                Assert.That(nestedCopy!.Message, Does.Contain("cannot be copied").And.Contain("not known"));
                 Assert.That(root!.Message, Does.Contain("root directory"));
                 Assert.That(harness.CallRequests, Has.Count.EqualTo(callsBeforeOperations));
+                Assert.That(harness.SessionMock.Invocations, Has.Count.EqualTo(invocationsBeforeOperations));
             });
         }
 
