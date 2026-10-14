@@ -2,7 +2,8 @@ name: ZONTAL pack
 
 # Builds and tests the ZONTAL-patched stack (see NOTICE.md), packs the
 # OPCFoundation.NetStandard.Opc.Ua.* packages at the fork version and pushes
-# them to the NuGet feed of the studio organization.
+# them to the NuGet feed of the organization that owns this repository:
+# GitHub Packages on github.com, or the enterprise feed on a GHE.com instance.
 
 on:
   push:
@@ -10,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Push the packages to the studio feed
+        description: Push the packages to the organization's NuGet feed
         type: boolean
         default: false
 
@@ -25,7 +26,6 @@ env:
   DOTNET_NOLOGO: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
   PACKAGE_VERSION: 2.0.0-zontal.1
-  NUGET_FEED: https://nuget.zontal.ghe.com/studio/index.json
 
 jobs:
   test:
@@ -105,6 +105,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      feed: ${{ steps.feed.outputs.url }}
     env:
       # The fork version replaces the Nerdbank.GitVersioning computation:
       # version.props takes Version/PackageVersion from these variables when
@@ -116,6 +118,20 @@ jobs:
       NBGV_Version: 2.0.0.0
       NBGV_AssemblyFileVersion: 2.0.0.0
     steps:
+      - name: Resolve the feed
+        id: feed
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="${GITHUB_SERVER_URL#https://}"
+          if [ "$host" = github.com ]; then
+            url="https://nuget.pkg.github.com/$GITHUB_REPOSITORY_OWNER/index.json"
+          else
+            url="https://nuget.$host/$GITHUB_REPOSITORY_OWNER/index.json"
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "NUGET_FEED=$url" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v7
 
       - uses: actions/setup-dotnet@v6
@@ -182,16 +198,16 @@ jobs:
           name: packages
           path: artifacts/*.nupkg
 
-      - name: Push to the studio feed
+      - name: Push to the feed
         if: github.event_name == 'push' || inputs.publish
         shell: bash
         env:
           NUGET_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          dotnet nuget add source "$NUGET_FEED" --name studio \
+          dotnet nuget add source "$NUGET_FEED" --name fork \
             --username "$GITHUB_ACTOR" --password "$NUGET_TOKEN" --store-password-in-clear-text
-          dotnet nuget push "artifacts/*.nupkg" --source studio --api-key "$NUGET_TOKEN" --skip-duplicate
+          dotnet nuget push "artifacts/*.nupkg" --source fork --api-key "$NUGET_TOKEN" --skip-duplicate
 
   verify:
     name: Verify the feed
@@ -201,6 +217,8 @@ jobs:
     permissions:
       contents: read
       packages: read
+    env:
+      NUGET_FEED: ${{ needs.pack.outputs.feed }}
     steps:
       - uses: actions/setup-dotnet@v6
         with:
@@ -214,7 +232,7 @@ jobs:
           set -euo pipefail
           host="${GITHUB_SERVER_URL#https://}"
           for id in OPCFoundation.NetStandard.Opc.Ua.Core OPCFoundation.NetStandard.Opc.Ua.Redundancy; do
-            versions=$(GH_HOST="$host" gh api "/orgs/studio/packages/nuget/$id/versions" --jq '.[].name')
+            versions=$(GH_HOST="$host" gh api "/orgs/$GITHUB_REPOSITORY_OWNER/packages/nuget/$id/versions" --jq '.[].name')
             echo "$id: $versions"
             echo "$versions" | grep -qx "$PACKAGE_VERSION"
           done
@@ -233,10 +251,10 @@ jobs:
             <packageSources>
               <clear />
               <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
-              <add key="studio" value="$NUGET_FEED" />
+              <add key="fork" value="$NUGET_FEED" />
             </packageSources>
             <packageSourceMapping>
-              <packageSource key="studio">
+              <packageSource key="fork">
                 <package pattern="OPCFoundation.NetStandard.Opc.Ua.*" />
               </packageSource>
               <packageSource key="nuget.org">
@@ -244,10 +262,10 @@ jobs:
               </packageSource>
             </packageSourceMapping>
             <packageSourceCredentials>
-              <studio>
+              <fork>
                 <add key="Username" value="%NUGET_USER%" />
                 <add key="ClearTextPassword" value="%NUGET_TOKEN%" />
-              </studio>
+              </fork>
             </packageSourceCredentials>
           </configuration>
           EOF
