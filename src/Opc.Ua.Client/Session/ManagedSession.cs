@@ -1950,6 +1950,10 @@ namespace Opc.Ua.Client
             {
                 await update(ct).ConfigureAwait(false);
                 result = await validator(current, endpoint.Description, ct).ConfigureAwait(false);
+
+                // A validator may ignore the token and still return Good; a
+                // cancelled validation is never an acceptance.
+                ct.ThrowIfCancellationRequested();
             }
             catch
             {

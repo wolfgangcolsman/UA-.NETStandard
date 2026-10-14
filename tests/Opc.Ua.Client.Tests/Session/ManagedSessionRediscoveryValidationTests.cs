@@ -212,6 +212,26 @@ namespace Opc.Ua.Client.Tests
         }
 
         [Test]
+        public void ValidatorThatIgnoresCancellationKeepsTheEndpointInUse()
+        {
+            ConfiguredEndpoint endpoint = CreateEndpoint();
+            using var cancellation = new CancellationTokenSource();
+
+            Assert.CatchAsync<System.OperationCanceledException>(
+                () => global::Opc.Ua.Client.ManagedSession.RefreshAndValidateEndpointAsync(
+                    endpoint,
+                    _ => DowngradeAsync(endpoint),
+                    async (_, _, _) =>
+                    {
+                        await cancellation.CancelAsync().ConfigureAwait(false);
+                        return ServiceResult.Good;
+                    },
+                    cancellation.Token));
+
+            AssertEndpointInUseKept(endpoint);
+        }
+
+        [Test]
         public void FailedRefreshKeepsTheEndpointInUseWithoutCallingTheValidator()
         {
             ConfiguredEndpoint endpoint = CreateEndpoint();
