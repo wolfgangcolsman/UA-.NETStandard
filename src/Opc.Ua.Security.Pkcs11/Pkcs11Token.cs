@@ -356,16 +356,27 @@ namespace Opc.Ua.Security.Pkcs11
         }
 
         /// <summary>
-        /// Finds the CKA_ID of a key object whose attribute holds the given
-        /// public value, for example the modulus of an RSA key.
+        /// Finds the CKA_ID of a key object whose attributes hold all the given
+        /// public values, for example the modulus and the public exponent of an
+        /// RSA key, or the point and the curve of an EC key.
         /// </summary>
+        /// <remarks>
+        /// The token searches by the first attribute; the others are read back
+        /// and compared, and a key whose value of such an attribute cannot be
+        /// read does not match. The big integers CKA_MODULUS and
+        /// CKA_PUBLIC_EXPONENT are compared without leading zero bytes.
+        /// </remarks>
         /// <param name="objectClass">The class of key object to search.</param>
         /// <param name="keyType">The key type to search.</param>
-        /// <param name="attribute">The attribute holding the public value.</param>
-        /// <param name="value">The public value to match.</param>
+        /// <param name="match">The attributes and the public values they must hold.</param>
         /// <returns>The CKA_ID, or <c>null</c> when no key matches.</returns>
-        public byte[]? FindKeyId(CKO objectClass, CKK keyType, CKA attribute, byte[] value)
+        public byte[]? FindKeyId(CKO objectClass, CKK keyType, params (CKA Attribute, byte[] Value)[] match)
         {
+            if (match == null || match.Length == 0)
+            {
+                throw new ArgumentException("At least one attribute must be matched.", nameof(match));
+            }
+
             lock (m_lock)
             {
                 ThrowIfDisposed();
@@ -374,14 +385,22 @@ namespace Opc.Ua.Security.Pkcs11
                 [
                     m_factories.ObjectAttributeFactory.Create(CKA.CKA_CLASS, objectClass),
                     m_factories.ObjectAttributeFactory.Create(CKA.CKA_KEY_TYPE, keyType),
-                    m_factories.ObjectAttributeFactory.Create(attribute, value)
+                    m_factories.ObjectAttributeFactory.Create(match[0].Attribute, match[0].Value)
                 ];
+                var read = new List<ulong>(match.Length) { (ulong)CKA.CKA_ID };
+                for (int ii = 1; ii < match.Length; ii++)
+                {
+                    read.Add((ulong)match[ii].Attribute);
+                }
 
                 foreach (IObjectHandle handle in m_session.FindAllObjects(search))
                 {
-                    List<IObjectAttribute> values = m_session.GetAttributeValue(
-                        handle,
-                        [(ulong)CKA.CKA_ID]);
+                    List<IObjectAttribute> values = m_session.GetAttributeValue(handle, read);
+
+                    if (!HoldsValues(values, match))
+                    {
+                        continue;
+                    }
 
                     byte[]? id = values[0].GetValueAsByteArray();
 
@@ -598,6 +617,42 @@ namespace Opc.Ua.Security.Pkcs11
             {
                 throw new ObjectDisposedException(nameof(Pkcs11Token));
             }
+        }
+
+        private static bool HoldsValues(List<IObjectAttribute> values, (CKA Attribute, byte[] Value)[] match)
+        {
+            for (int ii = 1; ii < match.Length; ii++)
+            {
+                byte[]? actual = values[ii].GetValueAsByteArray();
+
+                if (actual == null || actual.Length == 0)
+                {
+                    return false;
+                }
+
+                bool equal = match[ii].Attribute is CKA.CKA_MODULUS or CKA.CKA_PUBLIC_EXPONENT
+                    ? TrimLeadingZeros(actual).SequenceEqual(TrimLeadingZeros(match[ii].Value))
+                    : actual.AsSpan().SequenceEqual(match[ii].Value);
+
+                if (!equal)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static ReadOnlySpan<byte> TrimLeadingZeros(byte[] value)
+        {
+            int start = 0;
+
+            while (start < value.Length - 1 && value[start] == 0)
+            {
+                start++;
+            }
+
+            return value.AsSpan(start);
         }
 
         private readonly System.Threading.Lock m_lock = new();

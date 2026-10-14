@@ -441,6 +441,53 @@ namespace Opc.Ua.Security.Pkcs11.Tests
         }
 
         [Test]
+        public async Task StoreAddDoesNotLinkACertificateWithAForeignRsaExponentToTheKeyAsync()
+        {
+            using var module = new FakePkcs11Module();
+            using Pkcs11CertificateStore store = OpenStore(module);
+            byte[] encoded = module.IssueRsaCertificateWithForeignExponent("CN=ForeignExponent");
+            using Certificate foreign = Certificate.FromRawData(encoded);
+
+            await store.AddAsync(foreign).ConfigureAwait(false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(module.CertificateId(encoded), Is.Not.Null);
+                Assert.That(module.CertificateId(encoded), Is.Not.EqualTo(module.RsaId));
+            });
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public async Task StoreAddLinksAnEccCertificateOnlyToAKeyOnTheSameCurveAsync(bool otherCurve)
+        {
+            using var module = new FakePkcs11Module();
+            using Pkcs11CertificateStore store = OpenStore(module);
+            using Certificate identity = Certificate.FromRawData(module.EccCertificate);
+            // Without the certificate on the token the key can only be found
+            // through the public key object.
+            Assert.That(await store.DeleteAsync(identity.Thumbprint).ConfigureAwait(false), Is.True);
+            if (otherCurve)
+            {
+                // secp384r1
+                module.SetEccPublicKeyCurve([0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22]);
+            }
+            byte[] encoded = module.IssueEccCertificate("CN=RenewedOnCurve");
+            using Certificate renewed = Certificate.FromRawData(encoded);
+
+            await store.AddAsync(renewed).ConfigureAwait(false);
+
+            if (otherCurve)
+            {
+                Assert.That(module.CertificateId(encoded), Is.Not.EqualTo(module.EccId));
+            }
+            else
+            {
+                Assert.That(module.CertificateId(encoded), Is.EqualTo(module.EccId));
+            }
+        }
+
+        [Test]
         public async Task StoreAddIsIdempotentAsync()
         {
             using var module = new FakePkcs11Module();

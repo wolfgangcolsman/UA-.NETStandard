@@ -347,7 +347,7 @@ namespace Opc.Ua.Security.Pkcs11
 
                 using Certificate candidate = Certificate.FromRawData(entry.Key);
 
-                if (candidate.PublicKey.EncodedKeyValue.RawData.AsSpan().SequenceEqual(publicKey))
+                if (HasSamePublicKey(candidate, certificate))
                 {
                     return entry.Value;
                 }
@@ -370,16 +370,40 @@ namespace Opc.Ua.Security.Pkcs11
 #pragma warning restore CA5350
         }
 
+        /// <summary>
+        /// Whether two certificates carry the same public key: the key
+        /// algorithm, its encoded parameters (for an EC key the curve) and the
+        /// encoded key value must all be equal.
+        /// </summary>
+        private static bool HasSamePublicKey(Certificate a, Certificate b)
+        {
+            return string.Equals(a.PublicKey.Oid.Value, b.PublicKey.Oid.Value, StringComparison.Ordinal) &&
+                a.PublicKey.EncodedParameters.RawData.AsSpan()
+                    .SequenceEqual(b.PublicKey.EncodedParameters.RawData) &&
+                a.PublicKey.EncodedKeyValue.RawData.AsSpan()
+                    .SequenceEqual(b.PublicKey.EncodedKeyValue.RawData);
+        }
+
+        /// <summary>
+        /// Finds the CKA_ID of the key on the token the certificate belongs
+        /// to: an RSA key with the same modulus and public exponent, or an EC
+        /// key with the same point on the same curve.
+        /// </summary>
         private static byte[]? FindKeyId(Pkcs11Token token, Certificate certificate)
         {
             using (RSA? rsa = certificate.GetRSAPublicKey())
             {
                 if (rsa != null)
                 {
-                    byte[] modulus = rsa.ExportParameters(false).Modulus!;
+                    RSAParameters rsaParameters = rsa.ExportParameters(false);
+                    (CKA, byte[])[] rsaMatch =
+                    [
+                        (CKA.CKA_MODULUS, rsaParameters.Modulus!),
+                        (CKA.CKA_PUBLIC_EXPONENT, rsaParameters.Exponent!)
+                    ];
 
-                    return token.FindKeyId(CKO.CKO_PRIVATE_KEY, CKK.CKK_RSA, CKA.CKA_MODULUS, modulus) ??
-                        token.FindKeyId(CKO.CKO_PUBLIC_KEY, CKK.CKK_RSA, CKA.CKA_MODULUS, modulus);
+                    return token.FindKeyId(CKO.CKO_PRIVATE_KEY, CKK.CKK_RSA, rsaMatch) ??
+                        token.FindKeyId(CKO.CKO_PUBLIC_KEY, CKK.CKK_RSA, rsaMatch);
                 }
             }
 
@@ -396,10 +420,22 @@ namespace Opc.Ua.Security.Pkcs11
             parameters.Q.X.CopyTo(point, 1);
             parameters.Q.Y.CopyTo(point, 1 + parameters.Q.X.Length);
 
+            // CKA_EC_PARAMS holds the DER encoded curve, the same encoding as
+            // the parameters of the certificate's public key.
+            byte[] curve = certificate.PublicKey.EncodedParameters.RawData;
+
             // CKA_EC_POINT holds the DER encoded OCTET STRING; some modules
             // store the bare point instead.
-            return token.FindKeyId(CKO.CKO_PUBLIC_KEY, CKK.CKK_EC, CKA.CKA_EC_POINT, EncodeOctetString(point)) ??
-                token.FindKeyId(CKO.CKO_PUBLIC_KEY, CKK.CKK_EC, CKA.CKA_EC_POINT, point);
+            return token.FindKeyId(
+                    CKO.CKO_PUBLIC_KEY,
+                    CKK.CKK_EC,
+                    (CKA.CKA_EC_POINT, EncodeOctetString(point)),
+                    (CKA.CKA_EC_PARAMS, curve)) ??
+                token.FindKeyId(
+                    CKO.CKO_PUBLIC_KEY,
+                    CKK.CKK_EC,
+                    (CKA.CKA_EC_POINT, point),
+                    (CKA.CKA_EC_PARAMS, curve));
         }
 
         /// <summary>
