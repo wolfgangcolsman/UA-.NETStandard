@@ -30,11 +30,10 @@ and the tag `2.0.0-zontal.1` marks the packaged state.
 | 4 | `fix/pkcs11-store-add-delete` | `Pkcs11CertificateStore.AddAsync` writes the certificate object to the token (linked by CKA_ID to the key it belongs to; a private key is never written) instead of silently dropping it; `DeleteAsync` destroys the certificate objects with the thumbprint (keys stay on the token) instead of always throwing. |
 | 5 | `fix/pubsub-published-datasets-parent` | `PubSubNodeManager` places PublishedDataSet and DataSetFolder objects under `PublishSubscribe.PublishedDataSets` (i=17371) instead of under `DataSetFolderType`'s `<DataSetFolderName>` InstanceDeclaration (i=14478). |
 | 6 | `fix/server-subscription-restore-errors` | `SubscriptionManager.RestoreSubscriptionsAsync` surfaces a failed restore of durable subscriptions instead of logging and dropping it. `SubscriptionManager.ContinueOnRestoreFailure` restores the old behaviour. |
+| 7 | `fix/raft-kv-store-snapshot` | `RaftSharedKeyValueStore.CreateSnapshotAsync` / `RestoreSnapshot`: the store's half of the snapshot and compaction seam. An application snapshots the store (after a barrier commit), compacts its consensus log, and on restart restores the snapshot before the store applies the remaining log. The Raft engine parts are not in this repository; see [below](#known-unpatched-limitations). |
 | 8a | `fix/trustlist-validate-public` | `TrustList.ValidateNewTrustListAsync` is public. |
 | 8b | `fix/client-uafileinfo-public-constructor` | The `UaFileInfo` constructor is public, so a `FileSystemClient` can address a file by its NodeId. |
 | 8c | `fix/managed-session-rediscovery-validation` | `ManagedSession.ValidateRediscoveredEndpoint`: a hook that accepts or rejects the endpoint a reconnect rediscovers before it replaces the endpoint in use. |
-
-Item 7 (Raft snapshot and compaction) is not patched; see below.
 
 ## Known, unpatched limitations
 
@@ -48,14 +47,14 @@ are deliberately **left as they are** in this fork:
 - the registry that `CertificateStoreIdentifier.OpenStore` resolves store
   types through;
 - `HistoryClient` accepting history pages with an Uncertain status;
-- Raft snapshots and log compaction (item 7): ZONTAL's review found that
+- the Raft engine half of item 7: ZONTAL's review found that
   `RaftNode.ApplyEntry` never hands a snapshot to the application and that
   `FileRaftStorage.Compact` never shrinks the log file. Both types belong to
   the external `RaftCs` packages (`RaftCs`, `RaftCs.Storage.File` 1.1.2,
   whose package metadata names the repository github.com/marcschier/crdt),
-  not to this repository, so they cannot be patched here. `RaftSharedKeyValueStore`
-  has no snapshot hook; one is only usable once the engine delivers snapshots
-  and applied log indices, which `IRaftConsensus` does not carry.
+  not to this repository, so they cannot be patched here. The store-side seam
+  (patch 7) is in place; the engine must still deliver snapshots and applied
+  log indices, which `IRaftConsensus` does not carry.
 
 ## Strong naming
 
