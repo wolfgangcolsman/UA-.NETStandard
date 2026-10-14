@@ -248,6 +248,13 @@ namespace Opc.Ua.Redundancy
             ReadOnlyMemory<byte> snapshot,
             CancellationToken ct = default)
         {
+            // RaftCs 1.2.0-zontal.1 advances RaftNode.AppliedIndex just after it queues the applied
+            // commands, so a state machine can read an index the node does not report as applied yet,
+            // and CreateSnapshotAsync refuses an index past it.
+            while (m_node.AppliedIndex < appliedIndex)
+            {
+                await Task.Delay(1, ct).ConfigureAwait(false);
+            }
             await m_node.CreateSnapshotAsync(appliedIndex, snapshot, ct).ConfigureAwait(false);
             await m_node.CompactAsync(appliedIndex, ct).ConfigureAwait(false);
         }
