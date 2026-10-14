@@ -13,6 +13,10 @@ on:
         description: Push the packages to the studio feed
         type: boolean
         default: false
+      include_redundancy:
+        description: Pack the Redundancy packages as well
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -26,6 +30,8 @@ env:
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
   PACKAGE_VERSION: 2.0.0-zontal.1
   NUGET_FEED: https://nuget.zontal.ghe.com/studio/index.json
+  # A tag push always packs every package.
+  INCLUDE_REDUNDANCY: ${{ github.event_name == 'push' || inputs.include_redundancy }}
 
 jobs:
   test:
@@ -147,11 +153,15 @@ jobs:
             src/Opc.Ua.Di.Server/Opc.Ua.Di.Server.csproj
             src/Opc.Ua.Di.Client/Opc.Ua.Di.Client.csproj
             src/Opc.Ua.Security.Pkcs11/Opc.Ua.Security.Pkcs11.csproj
-            src/Opc.Ua.Redundancy/Opc.Ua.Redundancy.csproj
-            src/Opc.Ua.Redundancy.Server/Opc.Ua.Redundancy.Server.csproj
             tools/Opc.Ua.SourceGeneration.Pack/Opc.Ua.SourceGeneration.Pack.csproj
             tools/Opc.Ua.MigrationAnalyzer/Opc.Ua.MigrationAnalyzer.csproj
           )
+          if [ "$INCLUDE_REDUNDANCY" = 'true' ]; then
+            projects+=(
+              src/Opc.Ua.Redundancy/Opc.Ua.Redundancy.csproj
+              src/Opc.Ua.Redundancy.Server/Opc.Ua.Redundancy.Server.csproj
+            )
+          fi
           # The migration analyzer pack builds its Roslyn variants through MSBuild
           # tasks, which do not restore them.
           for project in tools/Opc.Ua.MigrationAnalyzer*/*.csproj; do
@@ -213,7 +223,11 @@ jobs:
         run: |
           set -euo pipefail
           host="${GITHUB_SERVER_URL#https://}"
-          for id in OPCFoundation.NetStandard.Opc.Ua.Core OPCFoundation.NetStandard.Opc.Ua.Redundancy; do
+          ids=(OPCFoundation.NetStandard.Opc.Ua.Core)
+          if [ "$INCLUDE_REDUNDANCY" = 'true' ]; then
+            ids+=(OPCFoundation.NetStandard.Opc.Ua.Redundancy)
+          fi
+          for id in "${ids[@]}"; do
             versions=$(GH_HOST="$host" gh api "/orgs/studio/packages/nuget/$id/versions" --jq '.[].name')
             echo "$id: $versions"
             echo "$versions" | grep -qx "$PACKAGE_VERSION"
