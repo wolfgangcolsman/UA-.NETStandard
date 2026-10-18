@@ -61,6 +61,13 @@ namespace Opc.Ua.Redundancy
     /// the materialized map. The change-feed (<see cref="WatchAsync"/>) is derived from the same apply stream, so
     /// watchers observe changes in commit order.
     /// </para>
+    /// <para>
+    /// Over an <see cref="IRaftSnapshotConsensus"/> the store applies the engine's apply stream with log indices
+    /// (<see cref="AppliedIndex"/>). A snapshot on that stream (a lagging replica installing the leader's snapshot, or
+    /// the first item after a restart) replaces the materialized map, and watchers receive the changes between the
+    /// former and the new map. With a compaction interval, the store snapshots its map every that many applied
+    /// commands and lets the engine discard the log behind the snapshot, which bounds the Raft log.
+    /// </para>
     /// </remarks>
     public sealed class RaftSharedKeyValueStore :
         ISharedKeyValueStore,
@@ -117,6 +124,58 @@ namespace Opc.Ua.Redundancy
             m_ownsConsensus = ownsConsensus;
             m_commitTimeout = commitTimeout == TimeSpan.Zero ? TimeSpan.FromSeconds(30) : commitTimeout;
         }
+
+        /// <summary>
+        /// Creates a store backed by the supplied consensus replica that bounds the Raft log: after every
+        /// <paramref name="compactionInterval"/> applied commands it snapshots its state into the consensus, which
+        /// discards the log behind the snapshot (<see cref="IRaftSnapshotConsensus.CompactAsync"/>).
+        /// </summary>
+        /// <param name="consensus">The consensus replica that replicates this store's commands.</param>
+        /// <param name="ownsConsensus">
+        /// When <c>true</c>, the consensus replica is disposed together with this store.
+        /// </param>
+        /// <param name="commitTimeout">
+        /// How long a proposal waits to commit before failing with a <see cref="TimeoutException"/>;
+        /// <see cref="TimeSpan.Zero"/> selects the default of 30 seconds.
+        /// </param>
+        /// <param name="compactionInterval">
+        /// When positive, the number of applied commands after which the store snapshots its state into the consensus.
+        /// Zero never compacts. A positive interval requires an <see cref="IRaftSnapshotConsensus"/>.
+        /// </param>
+        /// <exception cref="ArgumentNullException"><paramref name="consensus"/> is <c>null</c>.</exception>
+        /// <exception cref="ArgumentOutOfRangeException"><paramref name="compactionInterval"/> is negative.</exception>
+        /// <exception cref="ArgumentException">
+        /// <paramref name="compactionInterval"/> is positive and the consensus does not implement
+        /// <see cref="IRaftSnapshotConsensus"/>.
+        /// </exception>
+        public RaftSharedKeyValueStore(
+            IRaftConsensus consensus,
+            bool ownsConsensus,
+            TimeSpan commitTimeout,
+            int compactionInterval)
+            : this(consensus, ownsConsensus, commitTimeout)
+        {
+            if (compactionInterval < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(compactionInterval),
+                    "The compaction interval is negative.");
+            }
+            if (compactionInterval > 0 && consensus is not IRaftSnapshotConsensus)
+            {
+                throw new ArgumentException(
+                    "Compaction requires a consensus that implements IRaftSnapshotConsensus.",
+                    nameof(compactionInterval));
+            }
+            m_compactionInterval = compactionInterval;
+        }
+
+        /// <summary>
+        /// The log index of the last item of <see cref="IRaftSnapshotConsensus.CommittedItems"/> the store applied:
+        /// the log position its state corresponds to. Zero until the store applied an item, and always zero over a
+        /// consensus that does not implement <see cref="IRaftSnapshotConsensus"/>.
+        /// </summary>
+        public ulong AppliedIndex => Volatile.Read(ref m_appliedIndex);
 
         /// <inheritdoc/>
         public async ValueTask<(bool Found, ByteString Value)> TryGetAsync(string key, CancellationToken ct = default)
@@ -601,33 +660,17 @@ namespace Opc.Ua.Redundancy
         {
             try
             {
+                if (m_consensus is IRaftSnapshotConsensus snapshotting)
+                {
+                    await ApplyItemsAsync(snapshotting, ct).ConfigureAwait(false);
+                    return;
+                }
+
                 await foreach (ReadOnlyMemory<byte> command in m_consensus.Committed
                     .ReadAllAsync(ct)
                     .ConfigureAwait(false))
                 {
-                    // Every delivered command takes a position, including one
-                    // that is skipped or malformed, so the positions are the
-                    // same on every replica.
-                    long position;
-                    lock (m_lock)
-                    {
-                        position = ++m_appliedCommands;
-                        if (position <= m_skipThroughCommand)
-                        {
-                            // Already held by the restored snapshot.
-                            continue;
-                        }
-                    }
-                    try
-                    {
-                        Apply(command.Span, position);
-                    }
-                    catch (Exception ex)
-                    {
-                        Trace.TraceWarning(
-                            "Skipping malformed RaftSharedKeyValueStore command. The applier will continue. {0}",
-                            ex);
-                    }
+                    ApplyCommittedCommand(command.Span);
                 }
             }
             catch (OperationCanceledException)
@@ -640,6 +683,174 @@ namespace Opc.Ua.Redundancy
                 // ever dies unexpectedly, fail every pending proposal so callers
                 // do not hang.
                 FailAllPending(ex);
+            }
+        }
+
+        /// <summary>
+        /// Applies the apply stream of a consensus with log indices: commands, and snapshots that replace the state.
+        /// With a compaction interval, snapshots the state into the consensus after every that many commands.
+        /// </summary>
+        private async Task ApplyItemsAsync(IRaftSnapshotConsensus consensus, CancellationToken ct)
+        {
+            ulong snapshotIndex = 0;
+            int sinceSnapshot = 0;
+            await foreach (RaftCommittedItem item in consensus.CommittedItems
+                .ReadAllAsync(ct)
+                .ConfigureAwait(false))
+            {
+                if (item.IsSnapshot)
+                {
+                    // A snapshot that cannot be decoded leaves the state unknown: it stops the applier.
+                    InstallEngineSnapshot(item.Data.Span);
+                    snapshotIndex = item.Index;
+                    sinceSnapshot = 0;
+                }
+                else
+                {
+                    ApplyCommittedCommand(item.Data.Span);
+                    sinceSnapshot++;
+                }
+                Volatile.Write(ref m_appliedIndex, item.Index);
+
+                if (m_compactionInterval > 0 &&
+                    sinceSnapshot >= m_compactionInterval &&
+                    item.Index > snapshotIndex)
+                {
+                    sinceSnapshot = 0;
+                    if (await TryCompactAsync(consensus, item.Index, ct).ConfigureAwait(false))
+                    {
+                        snapshotIndex = item.Index;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Snapshots the state into the consensus at <paramref name="index"/>, the log index of the item just applied.
+        /// A failure leaves the log intact, only not yet bounded; the next interval retries.
+        /// </summary>
+        private async Task<bool> TryCompactAsync(IRaftSnapshotConsensus consensus, ulong index, CancellationToken ct)
+        {
+            byte[] snapshot;
+            try
+            {
+                lock (m_lock)
+                {
+                    if (m_appliedCommands < m_skipThroughCommand)
+                    {
+                        // The state holds commands the log has not delivered again yet (a restored
+                        // snapshot replayed from the first command), so it is not the state at this index.
+                        return false;
+                    }
+                    snapshot = EncodeEngineSnapshotLocked();
+                }
+                await consensus.CompactAsync(index, snapshot, ct).ConfigureAwait(false);
+                return true;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Trace.TraceWarning(
+                    "RaftSharedKeyValueStore could not compact the Raft log at index {0}. {1}",
+                    index,
+                    ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Encodes the state for the consensus engine: a format marker followed by the snapshot encoding of
+        /// <see cref="CreateSnapshotAsync"/> at the position of the last applied command. The caller holds
+        /// <c>m_lock</c>.
+        /// </summary>
+        private byte[] EncodeEngineSnapshotLocked()
+        {
+            byte[] state = EncodeSnapshotLocked(m_appliedCommands);
+            byte[] snapshot = new byte[state.Length + 1];
+            snapshot[0] = kEngineSnapshotFormat;
+            state.CopyTo(snapshot, 1);
+            return snapshot;
+        }
+
+        /// <summary>
+        /// Replaces the state with a snapshot the consensus delivered (a lagging replica installing the leader's
+        /// snapshot, or the first item after a restart) and publishes the differences to the watchers. A pending
+        /// operation whose command the snapshot covers is not applied on its own; it fails with the commit timeout,
+        /// its outcome unknown.
+        /// </summary>
+        /// <remarks>
+        /// The snapshot carries the position of its last command in the command stream, so the commands after it
+        /// keep the positions they have on every other replica. The consensus delivers every command after the
+        /// snapshot, so the snapshot also replaces a state restored with <see cref="RestoreSnapshotAsync"/>, and no
+        /// command is skipped after it.
+        /// </remarks>
+        /// <exception cref="FormatException">The snapshot is not one this store wrote.</exception>
+        private void InstallEngineSnapshot(ReadOnlySpan<byte> snapshot)
+        {
+            if (snapshot.IsEmpty || snapshot[0] != kEngineSnapshotFormat)
+            {
+                throw new FormatException(
+                    "The Raft engine delivered a snapshot in an unsupported format. Snapshots written by the " +
+                    "log compaction of OPC UA 2.0.0-zontal.1 are not supported.");
+            }
+            (Dictionary<string, ByteString> state, long lastIncludedCommand) = DecodeSnapshot(snapshot.Slice(1));
+            lock (m_lock)
+            {
+                foreach (KeyValuePair<string, ByteString> entry in m_state)
+                {
+                    if (!state.ContainsKey(entry.Key))
+                    {
+                        PublishLocked(new KeyValueChange { Kind = KeyValueChangeKind.Delete, Key = entry.Key });
+                    }
+                }
+                foreach (KeyValuePair<string, ByteString> entry in state)
+                {
+                    if (!m_state.TryGetValue(entry.Key, out ByteString current) || !current.Equals(entry.Value))
+                    {
+                        PublishLocked(new KeyValueChange
+                        {
+                            Kind = KeyValueChangeKind.Set,
+                            Key = entry.Key,
+                            Value = entry.Value
+                        });
+                    }
+                }
+                m_state.Clear();
+                foreach (KeyValuePair<string, ByteString> entry in state)
+                {
+                    m_state[entry.Key] = entry.Value;
+                }
+                m_appliedCommands = lastIncludedCommand;
+                m_skipThroughCommand = 0;
+            }
+        }
+
+        /// <summary>
+        /// Applies a committed command at the next position of the command stream.
+        /// </summary>
+        private void ApplyCommittedCommand(ReadOnlySpan<byte> command)
+        {
+            // Every delivered command takes a position, including one
+            // that is skipped or malformed, so the positions are the
+            // same on every replica.
+            long position;
+            lock (m_lock)
+            {
+                position = ++m_appliedCommands;
+                if (position <= m_skipThroughCommand)
+                {
+                    // Already held by the restored snapshot.
+                    return;
+                }
+            }
+            try
+            {
+                Apply(command, position);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning(
+                    "Skipping malformed RaftSharedKeyValueStore command. The applier will continue. {0}",
+                    ex);
             }
         }
 
@@ -909,6 +1120,7 @@ namespace Opc.Ua.Redundancy
         private const byte s_snapshotEncodingVersion = 1;
         private const byte kSnapshotNullValue = 0;
         private const byte kSnapshotValue = 1;
+        private const byte kEngineSnapshotFormat = 2;
         private static readonly UTF8Encoding s_strictUtf8 = new(
             encoderShouldEmitUTF8Identifier: false,
             throwOnInvalidBytes: true);
@@ -918,6 +1130,7 @@ namespace Opc.Ua.Redundancy
         private readonly bool m_processLocal;
         private readonly bool m_ownsConsensus;
         private readonly TimeSpan m_commitTimeout;
+        private readonly int m_compactionInterval;
         private readonly Guid m_originator = Guid.NewGuid();
         private readonly Dictionary<string, ByteString> m_state = new(StringComparer.Ordinal);
         private readonly List<Watcher> m_watchers = [];
@@ -934,5 +1147,6 @@ namespace Opc.Ua.Redundancy
         private int m_disposed;
         private long m_appliedCommands;
         private long m_skipThroughCommand;
+        private ulong m_appliedIndex;
     }
 }
