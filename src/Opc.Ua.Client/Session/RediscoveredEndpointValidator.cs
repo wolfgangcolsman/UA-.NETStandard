@@ -34,15 +34,50 @@ namespace Opc.Ua.Client
 {
     /// <summary>
     /// Accepts or rejects the endpoint a <see cref="ManagedSession"/>
-    /// rediscovered while it reconnects.
+    /// rediscovered while it reconnects. The session has already checked that
+    /// the rediscovered endpoint keeps the security mode and policy of the
+    /// endpoint in use; the validator adds application checks on top.
     /// </summary>
-    /// <param name="current">The endpoint the session used before the
-    /// rediscovery.</param>
+    /// <param name="current">The endpoint this session last accepted: the
+    /// endpoint it connected or failed over to, or the last rediscovered
+    /// endpoint it accepted. Endpoints that other sessions sharing the same
+    /// <see cref="ConfiguredEndpoint"/> published are not used.</param>
     /// <param name="rediscovered">The endpoint the server's discovery endpoint
     /// returned, which the session would use from now on.</param>
     /// <param name="ct">The cancellation token.</param>
-    /// <returns>Good to use the rediscovered endpoint; a Bad result keeps the
-    /// current endpoint and fails the reconnect attempt with that result.</returns>
+    /// <returns>Good to use the rediscovered endpoint. Any other result keeps
+    /// the current endpoint and fails the reconnect attempt: a Bad result with
+    /// that result, an Uncertain or <c>null</c> result with
+    /// <see cref="StatusCodes.BadSecurityChecksFailed"/>. An exception or a
+    /// cancellation also keeps the current endpoint.</returns>
+    /// <remarks>
+    /// Install the validator before the session connects, through
+    /// <see cref="ManagedSessionOptions.ValidateRediscoveredEndpoint"/>,
+    /// <see cref="ManagedSessionBuilder.WithRediscoveredEndpointValidator"/>
+    /// or by registering it in the service collection used by
+    /// <see cref="IManagedSessionFactory"/>. See the "Validating a
+    /// rediscovered endpoint" section of docs/Sessions.md.
+    /// </remarks>
+    /// <example>
+    /// Reject a rediscovered endpoint whose server certificate differs from
+    /// the pinned one:
+    /// <code><![CDATA[
+    /// RediscoveredEndpointValidator pinCertificate = (current, rediscovered, ct) =>
+    /// {
+    ///     if (rediscovered.ServerCertificate != current.ServerCertificate)
+    ///     {
+    ///         return new ValueTask<ServiceResult>(
+    ///             new ServiceResult(StatusCodes.BadCertificateInvalid));
+    ///     }
+    ///     return new ValueTask<ServiceResult>(ServiceResult.Good);
+    /// };
+    ///
+    /// ManagedSession session = await new ManagedSessionBuilder(configuration, telemetry)
+    ///     .UseEndpoint(endpoint)
+    ///     .WithRediscoveredEndpointValidator(pinCertificate)
+    ///     .ConnectAsync(ct);
+    /// ]]></code>
+    /// </example>
     public delegate ValueTask<ServiceResult> RediscoveredEndpointValidator(
         EndpointDescription current,
         EndpointDescription rediscovered,

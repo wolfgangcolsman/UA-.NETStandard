@@ -3,7 +3,7 @@
 > **ZONTAL-patched fork.** This repository is ZONTAL's fork of the OPC
 > Foundation UA-.NETStandard stack at tag `2.0.0` with the patches listed in
 > [NOTICE.md](NOTICE.md). Its packages keep the OPC Foundation package ids and
-> carry the version `2.0.0-zontal.1`; they are built without the OPC Foundation
+> carry the version `2.0.0-zontal.2`; they are built without the OPC Foundation
 > strong-name key. It is not an official OPC Foundation release. The OPC
 > Foundation MIT License 1.00 ([LICENSE.txt](LICENSE.txt)) applies unchanged.
 

@@ -29,7 +29,7 @@ concurrency:
 env:
   DOTNET_NOLOGO: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
-  PACKAGE_VERSION: 2.0.0-zontal.1
+  PACKAGE_VERSION: 2.0.0-zontal.2
   NUGET_FEED: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
   # A tag push always packs every package.
   INCLUDE_REDUNDANCY: ${{ github.event_name == 'push' || inputs.include_redundancy }}
@@ -89,21 +89,21 @@ jobs:
             dotnet test "$1" -f net10.0 -c Release --filter "$2" --logger "console;verbosity=normal"
           }
           run tests/Opc.Ua.SourceGeneration.Core.Tests/Opc.Ua.SourceGeneration.Core.Tests.csproj \
-            "FullyQualifiedName~NodeSetValueAbsentTests"
+            "FullyQualifiedName~NodeSetValueAbsentTests|FullyQualifiedName~ModelDependencyGeneratorTests|FullyQualifiedName~ModelDesignExtensionsTests"
           run tests/Opc.Ua.SourceGeneration.Tests/Opc.Ua.SourceGeneration.Tests.csproj \
-            "FullyQualifiedName~NodesetExternalReferenceTargetTests"
+            "FullyQualifiedName~NodesetExternalReferenceTargetTests|FullyQualifiedName~NodesetDependencyValueAbsentTests"
           run tests/Opc.Ua.Di.Tests/Opc.Ua.Di.Tests.csproj \
             "FullyQualifiedName~NodeSetNodesOnlyAddressSpaceTests"
           run tests/Opc.Ua.Security.Pkcs11.Tests/Opc.Ua.Security.Pkcs11.Tests.csproj \
             "FullyQualifiedName~Opc.Ua.Security.Pkcs11"
           run tests/Opc.Ua.PubSub.Server.Tests/Opc.Ua.PubSub.Server.Tests.csproj \
-            "FullyQualifiedName~PubSubNodeManager"
+            "FullyQualifiedName~PubSubNodeManager|FullyQualifiedName~PubSubMethodHandlersMutationTests"
           run tests/Opc.Ua.Server.Tests/Opc.Ua.Server.Tests.csproj \
-            "FullyQualifiedName~SubscriptionRestoreFailureTests|FullyQualifiedName~TrustListTests"
+            "FullyQualifiedName~SubscriptionRestore|FullyQualifiedName~DurableQueueRestoreRetryTests|FullyQualifiedName~MonitoredItemQueueRestoreTests|FullyQualifiedName~TrustListTests"
           run tests/Opc.Ua.Client.Tests/Opc.Ua.Client.Tests.csproj \
-            "FullyQualifiedName~FileSystemClientMetadataTests|FullyQualifiedName~ManagedSessionRediscoveryValidationTests"
+            "FullyQualifiedName~FileSystemClientMetadataTests|FullyQualifiedName~ManagedSession|FullyQualifiedName~SessionReconnectHandlerTests|FullyQualifiedName~SessionRecoveryAuditTests"
           run tests/Opc.Ua.Redundancy.Server.Tests/Opc.Ua.Redundancy.Server.Tests.csproj \
-            "FullyQualifiedName~RaftSharedKeyValueStore"
+            "FullyQualifiedName~RaftSharedKeyValueStore|FullyQualifiedName~SharedKeyValueMonitoredItemQueueFactoryTests|FullyQualifiedName~RedundancyConsistencyBuilderExtensionsTests"
 
   pack:
     name: Pack and push
@@ -117,9 +117,9 @@ jobs:
       # version.props takes Version/PackageVersion from these variables when
       # NBGV_PublicRelease is True (as the upstream release pipeline does).
       NBGV_PublicRelease: 'True'
-      NBGV_NuGetPackageVersion: 2.0.0-zontal.1
+      NBGV_NuGetPackageVersion: 2.0.0-zontal.2
       NBGV_SimpleVersion: 2.0.0
-      NBGV_PrereleaseVersion: -zontal.1
+      NBGV_PrereleaseVersion: -zontal.2
       NBGV_Version: 2.0.0.0
       NBGV_AssemblyFileVersion: 2.0.0.0
     steps:
@@ -160,6 +160,7 @@ jobs:
           if [ "$INCLUDE_REDUNDANCY" = 'true' ]; then
             projects+=(
               src/Opc.Ua.Redundancy/Opc.Ua.Redundancy.csproj
+              src/Opc.Ua.Redundancy.Client/Opc.Ua.Redundancy.Client.csproj
               src/Opc.Ua.Redundancy.Server/Opc.Ua.Redundancy.Server.csproj
             )
           fi

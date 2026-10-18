@@ -722,8 +722,8 @@ namespace Opc.Ua.PubSub.Server.Tests
                 RemoveSecurityGroupMethod = NewMethod(15447);
                 AddPushTargetMethod = NewMethod(25441);
                 RemovePushTargetMethod = NewMethod(25444);
-                AddDataSetFolderMethod = NewMethod(16884);
-                RemoveDataSetFolderMethod = NewMethod(16923);
+                AddDataSetFolderMethod = NewMethod(PublishedDataSetsNodeIds.AddDataSetFolder);
+                RemoveDataSetFolderMethod = NewMethod(PublishedDataSetsNodeIds.RemoveDataSetFolder);
                 StatusVariable = new BaseDataVariableState(null)
                 {
                     NodeId = new NodeId(17406u),
@@ -762,8 +762,10 @@ namespace Opc.Ua.PubSub.Server.Tests
                 diagnosticsNm.Setup(m => m.FindPredefinedNode<MethodState>(new NodeId(15447u))).Returns(RemoveSecurityGroupMethod);
                 diagnosticsNm.Setup(m => m.FindPredefinedNode<MethodState>(new NodeId(25441u))).Returns(AddPushTargetMethod);
                 diagnosticsNm.Setup(m => m.FindPredefinedNode<MethodState>(new NodeId(25444u))).Returns(RemovePushTargetMethod);
-                diagnosticsNm.Setup(m => m.FindPredefinedNode<MethodState>(new NodeId(16884u))).Returns(AddDataSetFolderMethod);
-                diagnosticsNm.Setup(m => m.FindPredefinedNode<MethodState>(new NodeId(16923u))).Returns(RemoveDataSetFolderMethod);
+                diagnosticsNm.Setup(m => m.FindPredefinedNode<MethodState>(
+                        new NodeId(PublishedDataSetsNodeIds.AddDataSetFolder))).Returns(AddDataSetFolderMethod);
+                diagnosticsNm.Setup(m => m.FindPredefinedNode<MethodState>(
+                        new NodeId(PublishedDataSetsNodeIds.RemoveDataSetFolder))).Returns(RemoveDataSetFolderMethod);
                 diagnosticsNm.Setup(m => m.FindPredefinedNode<BaseVariableState>(new NodeId(17406u))).Returns(StatusVariable);
                 diagnosticsNm.Setup(m => m.FindPredefinedNode<BaseVariableState>(It.IsAny<NodeId>()))
                     .Returns((NodeId id) => id == new NodeId(17406u) ? StatusVariable : null!);

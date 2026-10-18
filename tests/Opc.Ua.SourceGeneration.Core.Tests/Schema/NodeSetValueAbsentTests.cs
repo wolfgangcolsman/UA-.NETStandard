@@ -27,6 +27,8 @@
  * http://opcfoundation.org/License/MIT/1.00/
  * ======================================================================*/
 
+#nullable enable
+
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -36,6 +38,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using Opc.Ua.SourceGeneration;
+using Opc.Ua.SourceGeneration.Dependency;
 using Opc.Ua.Tests;
 
 namespace Opc.Ua.Schema.Model.Tests
@@ -91,6 +94,103 @@ namespace Opc.Ua.Schema.Model.Tests
             });
         }
 
+        [Test]
+        public void InstanceOfVariableTypeWithoutValueIsNull()
+        {
+            string body = ExtractMethodBody(GenerateDeviceSetPump(), "CreateInstanceOfFlowVariableType");
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(body, Does.Contain(NullValue));
+                Assert.That(body, Does.Not.Contain("(double)0"));
+            });
+        }
+
+        [Test]
+        public void SubtypeWithoutValueDoesNotInheritTheValueOfItsSupertype()
+        {
+            string generated = GenerateDeviceSetPump();
+            string supertype = ExtractMethodBody(generated, "CreateInstanceOfRatedFlowVariableType");
+            string subtype = ExtractMethodBody(generated, "CreateInstanceOfUnratedFlowVariableType");
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(supertype, Does.Contain("42.5"), "the supertype keeps its declared Value");
+                Assert.That(subtype, Does.Contain(NullValue));
+                Assert.That(subtype, Does.Not.Contain("42.5"));
+                Assert.That(subtype, Does.Not.Contain("(double)0"));
+            });
+        }
+
+        [TestCase("CreateUnsetRatedFlow")]
+        [TestCase("CreateRatedFlowMeter_UnsetFlow")]
+        [TestCase("CreateRatedFlowMeter1_RatedFlow")]
+        public void VariableWithoutValueDoesNotInheritTheValueOfItsVariableType(string method)
+        {
+            string body = ExtractMethodBody(GenerateDeviceSetPump(), method);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(body, Does.Contain(NullValue));
+                Assert.That(body, Does.Not.Contain("42.5"));
+                Assert.That(body, Does.Not.Contain("12.5"));
+                Assert.That(body, Does.Not.Contain("(double)0"));
+            });
+        }
+
+        [Test]
+        public void VariableWithValueOverridesTheValueOfItsVariableType()
+        {
+            string body = ExtractMethodBody(GenerateDeviceSetPump(), "CreateRatedFlowMeter_SetFlow");
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(body, Does.Contain("7.25"));
+                Assert.That(body, Does.Not.Contain("42.5"));
+            });
+        }
+
+        [Test]
+        public void DependencyPayloadCarriesTheAbsentValue()
+        {
+            var dependency = new ModelDependencyV1 { ModelUri = "http://test.org/UA/ValueAbsent/" };
+            dependency.Nodes.Add(new DependencyNode
+            {
+                SymbolicName = "PumpType",
+                SymbolicNamespace = "http://test.org/UA/ValueAbsent/",
+                ClassName = "PumpType",
+                Kind = DependencyNodeKind.ObjectType,
+                Children =
+                [
+                    new DependencyChild
+                    {
+                        BrowseName = "RatedFlow",
+                        SymbolicName = "RatedFlow",
+                        InstanceKind = 3,
+                        NodeSetValueIsNull = true
+                    },
+                    new DependencyChild
+                    {
+                        BrowseName = "SerialNumber",
+                        SymbolicName = "SerialNumber",
+                        InstanceKind = 3,
+                        DefaultValueXml = "<String xmlns=\"http://opcfoundation.org/UA/2008/02/Types.xsd\">SN</String>"
+                    }
+                ]
+            });
+
+            ModelDependencyV1? decoded = ModelDependencyV1.FromBase64Payload(dependency.ToBase64Payload());
+
+            Assert.That(decoded, Is.Not.Null);
+            IReadOnlyList<DependencyChild> children = decoded!.Nodes.Single().Children;
+            Assert.Multiple(() =>
+            {
+                Assert.That(children[0].NodeSetValueIsNull, Is.True);
+                Assert.That(children[1].NodeSetValueIsNull, Is.False);
+                Assert.That(children[1].DefaultValueXml, Does.Contain("SN"));
+            });
+        }
+
         private static string GenerateDeviceSetPump()
         {
             ITelemetryContext telemetry = NUnitTelemetryContext.Create(logLevel: LogLevel.Error);
@@ -142,6 +242,10 @@ namespace Opc.Ua.Schema.Model.Tests
                 <Aliases>
                     <Alias Alias="Double">i=11</Alias>
                     <Alias Alias="HasSubtype">i=45</Alias>
+                    <Alias Alias="HasTypeDefinition">i=40</Alias>
+                    <Alias Alias="Organizes">i=35</Alias>
+                    <Alias Alias="HasComponent">i=47</Alias>
+                    <Alias Alias="HasModellingRule">i=37</Alias>
                 </Aliases>
                 <UAVariableType NodeId="ns=1;i=2000" BrowseName="1:FlowVariableType" DataType="Double">
                     <DisplayName>FlowVariableType</DisplayName>
@@ -149,6 +253,83 @@ namespace Opc.Ua.Schema.Model.Tests
                         <Reference ReferenceType="HasSubtype" IsForward="false">i=63</Reference>
                     </References>
                 </UAVariableType>
+                <UAVariableType NodeId="ns=1;i=2001" BrowseName="1:RatedFlowVariableType" DataType="Double">
+                    <DisplayName>RatedFlowVariableType</DisplayName>
+                    <References>
+                        <Reference ReferenceType="HasSubtype" IsForward="false">i=63</Reference>
+                    </References>
+                    <Value>
+                        <Double xmlns="http://opcfoundation.org/UA/2008/02/Types.xsd">42.5</Double>
+                    </Value>
+                </UAVariableType>
+                <UAVariableType NodeId="ns=1;i=2002" BrowseName="1:UnratedFlowVariableType" DataType="Double">
+                    <DisplayName>UnratedFlowVariableType</DisplayName>
+                    <References>
+                        <Reference ReferenceType="HasSubtype" IsForward="false">ns=1;i=2001</Reference>
+                    </References>
+                </UAVariableType>
+                <UAVariable NodeId="ns=1;i=5000" BrowseName="1:UnsetRatedFlow" DataType="Double">
+                    <DisplayName>UnsetRatedFlow</DisplayName>
+                    <References>
+                        <Reference ReferenceType="HasTypeDefinition">ns=1;i=2001</Reference>
+                        <Reference ReferenceType="Organizes" IsForward="false">i=85</Reference>
+                    </References>
+                </UAVariable>
+                <UAObject NodeId="ns=1;i=5001" BrowseName="1:RatedFlowMeter">
+                    <DisplayName>RatedFlowMeter</DisplayName>
+                    <References>
+                        <Reference ReferenceType="HasTypeDefinition">i=58</Reference>
+                        <Reference ReferenceType="Organizes" IsForward="false">i=85</Reference>
+                        <Reference ReferenceType="HasComponent">ns=1;i=5002</Reference>
+                        <Reference ReferenceType="HasComponent">ns=1;i=5003</Reference>
+                    </References>
+                </UAObject>
+                <UAVariable NodeId="ns=1;i=5002" BrowseName="1:UnsetFlow" ParentNodeId="ns=1;i=5001" DataType="Double">
+                    <DisplayName>UnsetFlow</DisplayName>
+                    <References>
+                        <Reference ReferenceType="HasTypeDefinition">ns=1;i=2001</Reference>
+                    </References>
+                </UAVariable>
+                <UAVariable NodeId="ns=1;i=5003" BrowseName="1:SetFlow" ParentNodeId="ns=1;i=5001" DataType="Double">
+                    <DisplayName>SetFlow</DisplayName>
+                    <References>
+                        <Reference ReferenceType="HasTypeDefinition">ns=1;i=2001</Reference>
+                    </References>
+                    <Value>
+                        <Double xmlns="http://opcfoundation.org/UA/2008/02/Types.xsd">7.25</Double>
+                    </Value>
+                </UAVariable>
+                <UAObjectType NodeId="ns=1;i=1001" BrowseName="1:RatedFlowMeterType">
+                    <DisplayName>RatedFlowMeterType</DisplayName>
+                    <References>
+                        <Reference ReferenceType="HasSubtype" IsForward="false">i=58</Reference>
+                        <Reference ReferenceType="HasComponent">ns=1;i=6000</Reference>
+                    </References>
+                </UAObjectType>
+                <UAVariable NodeId="ns=1;i=6000" BrowseName="1:RatedFlow" ParentNodeId="ns=1;i=1001" DataType="Double">
+                    <DisplayName>RatedFlow</DisplayName>
+                    <References>
+                        <Reference ReferenceType="HasTypeDefinition">ns=1;i=2001</Reference>
+                        <Reference ReferenceType="HasModellingRule">i=78</Reference>
+                    </References>
+                    <Value>
+                        <Double xmlns="http://opcfoundation.org/UA/2008/02/Types.xsd">12.5</Double>
+                    </Value>
+                </UAVariable>
+                <UAObject NodeId="ns=1;i=5004" BrowseName="1:RatedFlowMeter1">
+                    <DisplayName>RatedFlowMeter1</DisplayName>
+                    <References>
+                        <Reference ReferenceType="HasTypeDefinition">ns=1;i=1001</Reference>
+                        <Reference ReferenceType="Organizes" IsForward="false">i=85</Reference>
+                        <Reference ReferenceType="HasComponent">ns=1;i=5005</Reference>
+                    </References>
+                </UAObject>
+                <UAVariable NodeId="ns=1;i=5005" BrowseName="1:RatedFlow" ParentNodeId="ns=1;i=5004" DataType="Double">
+                    <DisplayName>RatedFlow</DisplayName>
+                    <References>
+                        <Reference ReferenceType="HasTypeDefinition">ns=1;i=2001</Reference>
+                    </References>
+                </UAVariable>
             </UANodeSet>
             """;
     }

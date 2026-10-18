@@ -54,7 +54,8 @@ namespace Opc.Ua.Redundancy
         /// the discarded entries, and delivers it on <see cref="CommittedItems"/> after a restart.
         /// </summary>
         /// <param name="appliedIndex">
-        /// The <see cref="RaftCommittedItem.Index"/> of the last item the state machine applied.
+        /// The <see cref="RaftCommittedItem.Index"/> of the last item the state machine applied; at least 1 and later
+        /// than the latest snapshot the engine holds.
         /// </param>
         /// <param name="snapshot">The encoded state of the state machine at <paramref name="appliedIndex"/>.</param>
         /// <param name="ct">Cancellation token.</param>

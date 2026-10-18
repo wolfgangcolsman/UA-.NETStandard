@@ -26,7 +26,6 @@
  * The complete license agreement can be found here:
  * http://opcfoundation.org/License/MIT/1.00/
  * ======================================================================*/
-
 // CA2007: tests run without a SynchronizationContext; ConfigureAwait(false)
 // adds noise without a behavioural benefit. Disabled file-level for the suite.
 #pragma warning disable CA2007
@@ -35,6 +34,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using Opc.Ua.Redundancy;
@@ -62,7 +62,7 @@ namespace Opc.Ua.Server.Tests.Redundancy
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             var storage = new MemoryStorage(new ConfState(new ulong[] { 1 }));
             var store = new RaftSharedKeyValueStore(
-                CreateSingleNode(network, storage), ownsConsensus: true, compactionInterval: 10);
+                CreateSingleNode(network, storage), true, TimeSpan.Zero, compactionInterval: 10);
             try
             {
                 for (int ii = 0; ii < 35; ii++)
@@ -74,6 +74,7 @@ namespace Opc.Ua.Server.Tests.Redundancy
                 await WaitUntilAsync(() => storage.FirstIndex() > 31, cts.Token);
                 Snapshot snapshot = storage.LatestSnapshot();
                 Assert.That(snapshot, Is.Not.Null);
+                Assert.That(snapshot.IsEmpty, Is.False);
                 Assert.That(storage.FirstIndex(), Is.EqualTo(snapshot.Metadata.Index + 1));
                 Assert.That(store.AppliedIndex, Is.GreaterThanOrEqualTo(36UL));
                 for (int ii = 0; ii < 35; ii++)
@@ -126,8 +127,8 @@ namespace Opc.Ua.Server.Tests.Redundancy
                     // The lagging replica never compacts, so a snapshot in its storage is the leader's.
                     stores[ii] = new RaftSharedKeyValueStore(
                         nodes[ii],
-                        ownsConsensus: false,
-                        commitTimeout: TimeSpan.FromSeconds(20),
+                        false,
+                        TimeSpan.FromSeconds(20),
                         compactionInterval: ii == lagging ? 0 : 5);
                 }
 
@@ -160,12 +161,20 @@ namespace Opc.Ua.Server.Tests.Redundancy
                     ByteString value = await WaitForValueAsync(stores[lagging], Key(ii), cts.Token);
                     Assert.That(value.ToArray(), Is.EqualTo(Value(ii).ToArray()));
                 }
-                Assert.That(storages[lagging].LatestSnapshot(), Is.Not.Null);
-                Assert.That(stores[lagging].AppliedIndex, Is.GreaterThan(storages[lagging].LatestSnapshot().Metadata.Index));
+                Snapshot installed = storages[lagging].LatestSnapshot();
+                Assert.That(installed, Is.Not.Null);
+                Assert.That(installed.IsEmpty, Is.False);
+                Assert.That(stores[lagging].AppliedIndex, Is.GreaterThan(installed.Metadata.Index));
 
                 // The watcher of the lagging replica sees every key the snapshot brought in.
                 await watch;
                 Assert.That(watched.IsSupersetOf(expected), Is.True);
+
+                // The installed snapshot carries the command position, so the replicas keep numbering the
+                // command stream alike.
+                RaftKeyValueSnapshot onLeader = await stores[leader].CreateSnapshotAsync(cts.Token);
+                RaftKeyValueSnapshot onLagging = await stores[lagging].CreateSnapshotAsync(cts.Token);
+                Assert.That(onLagging.LastIncludedCommand, Is.EqualTo(onLeader.LastIncludedCommand + 1));
             }
             finally
             {
@@ -186,16 +195,16 @@ namespace Opc.Ua.Server.Tests.Redundancy
         [Test]
         public async Task RestartRestoresTheStateFromTheSnapshotAndTheLogAsync()
         {
-            string directory = Path.Combine(Path.GetTempPath(), "raft-kv-" + Guid.NewGuid().ToString("N"));
+            string directory = NewDirectory();
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             try
             {
+                long positionBeforeRestart;
                 await using (var network = new InMemoryNetwork())
                 {
-                    using var storage = new FileRaftStorage(new FileRaftStorageOptions(directory) { Fsync = false });
-                    storage.SetConfState(new ConfState(new ulong[] { 1 }));
+                    using var storage = OpenStorage(directory, initialize: true);
                     await using var store = new RaftSharedKeyValueStore(
-                        CreateSingleNode(network, storage), ownsConsensus: true, compactionInterval: 5);
+                        CreateSingleNode(network, storage), true, TimeSpan.Zero, compactionInterval: 5);
                     for (int ii = 0; ii < 12; ii++)
                     {
                         await store.SetAsync(Key(ii), Value(ii), cts.Token);
@@ -203,15 +212,24 @@ namespace Opc.Ua.Server.Tests.Redundancy
 
                     // The 10th command is index 11: the snapshot covers it, the log holds the rest.
                     await WaitUntilAsync(() => storage.FirstIndex() > 11, cts.Token);
+                    positionBeforeRestart = (await store.CreateSnapshotAsync(cts.Token)).LastIncludedCommand;
                 }
 
                 await using (var network = new InMemoryNetwork())
                 {
-                    using var storage = new FileRaftStorage(new FileRaftStorageOptions(directory) { Fsync = false });
-                    Assert.That(storage.LatestSnapshot(), Is.Not.Null);
+                    using var storage = OpenStorage(directory, initialize: false);
+                    Snapshot snapshot = storage.LatestSnapshot();
+                    Assert.That(snapshot, Is.Not.Null);
+                    Assert.That(snapshot.IsEmpty, Is.False);
                     Assert.That(storage.FirstIndex(), Is.GreaterThan(11UL));
                     await using var store = new RaftSharedKeyValueStore(
-                        CreateSingleNode(network, storage), ownsConsensus: true, compactionInterval: 5);
+                        CreateSingleNode(network, storage), true, TimeSpan.Zero, compactionInterval: 5);
+
+                    // The engine's snapshot carries its command position: the commands after it continue the
+                    // numbering of the store before the restart.
+                    RaftKeyValueSnapshot afterRestart = await store.CreateSnapshotAsync(cts.Token);
+                    Assert.That(positionBeforeRestart, Is.EqualTo(13L), "twelve sets and the barrier");
+                    Assert.That(afterRestart.LastIncludedCommand, Is.EqualTo(positionBeforeRestart + 1));
                     for (int ii = 0; ii < 12; ii++)
                     {
                         (bool found, ByteString value) = await store.TryGetAsync(Key(ii), cts.Token);
@@ -222,19 +240,161 @@ namespace Opc.Ua.Server.Tests.Redundancy
             }
             finally
             {
-                if (Directory.Exists(directory))
+                DeleteDirectory(directory);
+            }
+        }
+
+        [Test]
+        public async Task RestoredSnapshotAndAnOlderEngineSnapshotCombineAsync()
+        {
+            string directory = NewDirectory();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            try
+            {
+                RaftKeyValueSnapshot restored;
+                await using (var network = new InMemoryNetwork())
                 {
-                    Directory.Delete(directory, recursive: true);
+                    using var storage = OpenStorage(directory, initialize: true);
+                    await using var store = new RaftSharedKeyValueStore(
+                        CreateSingleNode(network, storage), true, TimeSpan.Zero, compactionInterval: 10);
+                    for (int ii = 0; ii < 10; ii++)
+                    {
+                        await store.SetAsync(Key(ii), Value(ii), cts.Token);
+                    }
+
+                    // The engine snapshot is at the 10th command; "counter" is created and swapped after it.
+                    await WaitUntilAsync(() => storage.LatestSnapshot() is { IsEmpty: false }, cts.Token);
+                    await store.SetAsync("counter", Value(1), cts.Token);
+                    Assert.That(await store.CompareAndSwapAsync("counter", Value(1), Value(2), cts.Token), Is.True);
+                    restored = await store.CreateSnapshotAsync(cts.Token);
+                }
+                Assert.That(restored.LastIncludedCommand, Is.EqualTo(13L));
+
+                await using (var network = new InMemoryNetwork())
+                {
+                    using var storage = OpenStorage(directory, initialize: false);
+                    await using var store = new RaftSharedKeyValueStore(
+                        CreateSingleNode(network, storage), true, TimeSpan.Zero, compactionInterval: 10);
+                    await store.RestoreSnapshotAsync(restored.Data, RaftSnapshotLogReplay.FromFirstCommand, cts.Token);
+
+                    // The engine delivers its snapshot, older than the restored one, and the log after it: the
+                    // store ends at the state of every command, each applied once, and numbers them alike.
+                    (bool found, ByteString value) = await store.TryGetAsync("counter", cts.Token);
+                    Assert.That(found, Is.True);
+                    Assert.That(value.ToArray(), Is.EqualTo(Value(2).ToArray()));
+                    Assert.That((await store.CreateSnapshotAsync(cts.Token)).LastIncludedCommand, Is.EqualTo(15L));
+                    for (int ii = 0; ii < 10; ii++)
+                    {
+                        (found, _) = await store.TryGetAsync(Key(ii), cts.Token);
+                        Assert.That(found, Is.True, Key(ii));
+                    }
                 }
             }
+            finally
+            {
+                DeleteDirectory(directory);
+            }
+        }
+
+        [Test]
+        public async Task EngineSnapshotNewerThanTheRestoredSnapshotReplacesItAsync()
+        {
+            var consensus = new ScriptedSnapshotConsensus();
+            await using var source = new RaftSharedKeyValueStore(consensus, false, TimeSpan.Zero, compactionInterval: 3);
+            await source.SetAsync("a", Value(1));
+            RaftKeyValueSnapshot older = await source.CreateSnapshotAsync();
+            await source.SetAsync("b", Value(2));
+            await consensus.WaitForCompactionAsync();
+            (ulong index, byte[] engineSnapshot) = consensus.Compactions[0];
+
+            var target = new ScriptedSnapshotConsensus();
+            await using var store = new RaftSharedKeyValueStore(target, false, TimeSpan.Zero, compactionInterval: 0);
+            await store.RestoreSnapshotAsync(older.Data, RaftSnapshotLogReplay.AfterSnapshot);
+            var changes = new List<KeyValueChange>();
+            using var watching = new CancellationTokenSource();
+            Task watch = CollectAsync(store, changes, 1, watching.Token);
+            await target.DeliverSnapshotAsync(index, engineSnapshot);
+            await watch.WaitAsync(TimeSpan.FromSeconds(10));
+
+            (bool found, _) = await store.TryGetAsync("b");
+            Assert.Multiple(() =>
+            {
+                Assert.That(found, Is.True);
+                Assert.That(changes[0].Key, Is.EqualTo("b"));
+                Assert.That(store.AppliedIndex, Is.GreaterThan(index));
+            });
+            Assert.That((await store.CreateSnapshotAsync()).LastIncludedCommand, Is.EqualTo(5L));
+        }
+
+        [Test]
+        public async Task CompactionWaitsUntilTheReplayedLogReachesTheRestoredSnapshotAsync()
+        {
+            var source = new ScriptedSnapshotConsensus();
+            await using var origin = new RaftSharedKeyValueStore(source, false, TimeSpan.Zero, compactionInterval: 0);
+            for (int ii = 0; ii < 4; ii++)
+            {
+                await origin.SetAsync(Key(ii), Value(ii));
+            }
+            RaftKeyValueSnapshot snapshot = await origin.CreateSnapshotAsync();
+
+            var target = new ScriptedSnapshotConsensus();
+            await using var store = new RaftSharedKeyValueStore(target, false, TimeSpan.Zero, compactionInterval: 2);
+            await store.RestoreSnapshotAsync(snapshot.Data, RaftSnapshotLogReplay.FromFirstCommand);
+            foreach (byte[] command in source.Proposed)
+            {
+                await target.DeliverCommandAsync(command);
+            }
+            (bool found, _) = await store.TryGetAsync(Key(3));
+            await target.WaitForCompactionAsync();
+
+            // Only the state at the barrier after the replayed commands is the state at its log index.
+            Assert.Multiple(() =>
+            {
+                Assert.That(found, Is.True);
+                Assert.That(target.Compactions, Has.Count.EqualTo(1));
+                Assert.That(target.Compactions[0].Index, Is.EqualTo(6UL));
+            });
+        }
+
+        [Test]
+        public async Task EngineSnapshotOfAnUnsupportedFormatStopsTheApplierAsync()
+        {
+            var consensus = new ScriptedSnapshotConsensus();
+            await using var store = new RaftSharedKeyValueStore(consensus, false, TimeSpan.FromSeconds(30), 0);
+            consensus.HoldCommands = true;
+            Task<bool> pending = store.DeleteAsync("a").AsTask();
+            await consensus.WaitForProposalAsync();
+
+            // The snapshot format of the 2.0.0-zontal.1 compaction starts with the encoding version 1.
+            await consensus.DeliverSnapshotAsync(1, [1, 0, 0, 0, 0]);
+
+            FormatException error = null;
+            try
+            {
+                await pending.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            catch (FormatException e)
+            {
+                error = e;
+            }
+
+            Assert.That(error?.Message, Does.Contain("unsupported format"));
         }
 
         [Test]
         public void CompactionNeedsASnapshottingConsensus()
         {
             Assert.That(
-                () => new RaftSharedKeyValueStore(new InProcessRaftConsensus(), compactionInterval: 5),
+                () => new RaftSharedKeyValueStore(new InProcessRaftConsensus(), true, TimeSpan.Zero, 5),
                 Throws.ArgumentException);
+        }
+
+        [Test]
+        public void CompactionIntervalIsNotNegative()
+        {
+            Assert.That(
+                () => new RaftSharedKeyValueStore(new ScriptedSnapshotConsensus(), false, TimeSpan.Zero, -1),
+                Throws.InstanceOf<ArgumentOutOfRangeException>());
         }
 
         private static DefaultRaftConsensus CreateSingleNode(InMemoryNetwork network, IRaftWritableStorage storage)
@@ -247,6 +407,29 @@ namespace Opc.Ua.Server.Tests.Redundancy
                 config => config.ElectionTick = 3);
         }
 
+        private static FileRaftStorage OpenStorage(string directory, bool initialize)
+        {
+            var storage = new FileRaftStorage(new FileRaftStorageOptions(directory) { Fsync = false });
+            if (initialize)
+            {
+                storage.SetConfState(new ConfState(new ulong[] { 1 }));
+            }
+            return storage;
+        }
+
+        private static string NewDirectory()
+        {
+            return Path.Combine(Path.GetTempPath(), "raft-kv-" + Guid.NewGuid().ToString("N"));
+        }
+
+        private static void DeleteDirectory(string directory)
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
         private static string Key(int ii)
         {
             return "k" + ii.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -255,6 +438,22 @@ namespace Opc.Ua.Server.Tests.Redundancy
         private static ByteString Value(int ii)
         {
             return ByteString.From(new byte[] { (byte)ii, (byte)(ii + 1) });
+        }
+
+        private static async Task CollectAsync(
+            RaftSharedKeyValueStore store,
+            List<KeyValueChange> changes,
+            int count,
+            CancellationToken ct)
+        {
+            await foreach (KeyValueChange change in store.WatchAsync(string.Empty, ct))
+            {
+                changes.Add(change);
+                if (changes.Count >= count)
+                {
+                    return;
+                }
+            }
         }
 
         private static async Task WatchAsync(
@@ -315,6 +514,125 @@ namespace Opc.Ua.Server.Tests.Redundancy
             {
                 await Task.Delay(10, ct);
             }
+        }
+
+        /// <summary>
+        /// A single-replica <see cref="IRaftSnapshotConsensus"/> that commits every proposal at the next log index
+        /// (unless <see cref="HoldCommands"/> is set), records compactions, and delivers snapshots on request.
+        /// </summary>
+        private sealed class ScriptedSnapshotConsensus : IRaftSnapshotConsensus
+        {
+            public bool IsLeader => true;
+
+            public event Action<bool> LeadershipChanged
+            {
+                add { }
+                remove { }
+            }
+
+            public bool HoldCommands { get; set; }
+
+            public List<(ulong Index, byte[] Snapshot)> Compactions { get; } = [];
+
+            public List<byte[]> Proposed { get; } = [];
+
+            public ChannelReader<ReadOnlyMemory<byte>> Committed =>
+                throw new NotSupportedException("The store reads CommittedItems.");
+
+            public ChannelReader<RaftCommittedItem> CommittedItems => m_items.Reader;
+
+            public ValueTask StartAsync(CancellationToken ct = default)
+            {
+                return default;
+            }
+
+            public async ValueTask ProposeAsync(ReadOnlyMemory<byte> command, CancellationToken ct = default)
+            {
+                lock (Proposed)
+                {
+                    Proposed.Add(command.ToArray());
+                }
+                m_proposed.TrySetResult(true);
+                if (HoldCommands)
+                {
+                    return;
+                }
+                await m_gate.WaitAsync(ct);
+                try
+                {
+                    await m_items.Writer.WriteAsync(new RaftCommittedItem(false, ++m_index, command.ToArray()), ct);
+                }
+                finally
+                {
+                    m_gate.Release();
+                }
+            }
+
+            public ValueTask CampaignAsync(CancellationToken ct = default)
+            {
+                return default;
+            }
+
+            public ValueTask CompactAsync(ulong appliedIndex, ReadOnlyMemory<byte> snapshot, CancellationToken ct = default)
+            {
+                lock (Compactions)
+                {
+                    Compactions.Add((appliedIndex, snapshot.ToArray()));
+                }
+                m_compacted.TrySetResult(true);
+                return default;
+            }
+
+            public async Task DeliverSnapshotAsync(ulong index, byte[] snapshot)
+            {
+                await m_gate.WaitAsync();
+                try
+                {
+                    m_index = Math.Max(m_index, index);
+                    await m_items.Writer.WriteAsync(new RaftCommittedItem(true, index, snapshot));
+                }
+                finally
+                {
+                    m_gate.Release();
+                }
+            }
+
+            public async Task DeliverCommandAsync(byte[] command)
+            {
+                await m_gate.WaitAsync();
+                try
+                {
+                    await m_items.Writer.WriteAsync(new RaftCommittedItem(false, ++m_index, command));
+                }
+                finally
+                {
+                    m_gate.Release();
+                }
+            }
+            public Task<bool> WaitForCompactionAsync()
+            {
+                return m_compacted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+
+            public Task<bool> WaitForProposalAsync()
+            {
+                return m_proposed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                m_items.Writer.TryComplete();
+                m_gate.Dispose();
+                return default;
+            }
+
+            private readonly Channel<RaftCommittedItem> m_items = Channel.CreateUnbounded<RaftCommittedItem>();
+            private readonly SemaphoreSlim m_gate = new(1, 1);
+            private readonly TaskCompletionSource<bool> m_compacted =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+            private readonly TaskCompletionSource<bool> m_proposed =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+            private ulong m_index;
         }
     }
 }
